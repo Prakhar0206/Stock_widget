@@ -427,7 +427,13 @@ class WidgetView:
         self._bind_tooltip(hb_tag, strip.heartbeat_tooltip)
         hx += 2 * r_ + 10
 
-        # 3. Problem Icons Strip (ordered Red first, then Amber, with key badges & +N overflow)
+        # 3. Direct Clocks (IST | NY) - visible without requiring hover
+        clock_str = f"{hv.ist}  |  {hv.ny}"
+        clk_item = self._t(hx, y, clock_str, GREY, f, tags=("status_clocks",))
+        self._bind_tooltip("status_clocks", f"{strip.session_tooltip} · {strip.heartbeat_tooltip}")
+        hx = c.bbox(clk_item)[2] + 12
+
+        # 4. Problem Icons Strip (ordered Red first, then Amber, with key badges & +N overflow)
         for idx, prob in enumerate(strip.problems):
             ptag = f"status_problem_{idx}"
             pcol = RED if prob.color == "red" else AMBER

@@ -96,5 +96,28 @@ def test_log_filter_masks_secrets_inside_tracebacks(tmp_path, monkeypatch):
 def test_redact_is_a_noop_without_secrets_and_never_raises(monkeypatch):
     from store import redact
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.delenv("FINNHUB_API_KEYS", raising=False)
     assert redact("AAPL zone sell price 207.50 source finnhub") == "AAPL zone sell price 207.50 source finnhub"
     assert redact("") == ""
+
+
+def test_redact_masks_multiple_comma_separated_keys(monkeypatch):
+    from store import redact
+    monkeypatch.setenv("FINNHUB_API_KEY", "pool_key_alpha, pool_key_beta; pool_key_gamma")
+    sample = "failed key pool_key_alpha and pool_key_gamma with code 429"
+    redacted = redact(sample)
+    assert "pool_key_alpha" not in redacted
+    assert "pool_key_gamma" not in redacted
+    assert "failed key [REDACTED_KEY] and [REDACTED_KEY] with code 429" in redacted
+
+
+def test_redact_masks_keys_from_finnhub_api_keys_and_registered(monkeypatch):
+    from store import redact, register_keys_for_redaction
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.setenv("FINNHUB_API_KEYS", "env_secret_key_1, env_secret_key_2")
+    register_keys_for_redaction(["config_secret_key_99"])
+    sample = "request error env_secret_key_1 alongside config_secret_key_99"
+    redacted = redact(sample)
+    assert "env_secret_key_1" not in redacted
+    assert "config_secret_key_99" not in redacted
+    assert "request error [REDACTED_KEY] alongside [REDACTED_KEY]" in redacted

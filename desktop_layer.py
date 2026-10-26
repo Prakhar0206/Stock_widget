@@ -405,7 +405,7 @@ class DesktopLayer:
         self._old_wndproc = self._wndproc_ref = None
         self._registered = []
         self.hotkeys = HotkeyListener()
-        self.click_through = True
+        self.click_through = bool(self.look.get("click_through", True))
 
     def _opacity(self) -> float:
         try:

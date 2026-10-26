@@ -250,12 +250,42 @@ _TOKEN_HEADER = re.compile(r"(X-Finnhub-Token\W+)[^\s,;}'\"]+", re.IGNORECASE)
 _TOKEN_QUERY = re.compile(r"([?&]token=)[^&\s'\"]+", re.IGNORECASE)
 
 
+_EXTRA_KEYS_TO_REDACT: set[str] = set()
+
+
+def register_keys_for_redaction(keys: list[str]) -> None:
+    """Register keys (e.g. from config.json) so they are masked in app.log."""
+    if not keys:
+        return
+    for k in keys:
+        if isinstance(k, str):
+            k_clean = k.strip().strip('"\'').strip()
+            if len(k_clean) >= 4:
+                _EXTRA_KEYS_TO_REDACT.add(k_clean)
+
+
 def redact(text: str) -> str:
     """Second line of defence: the code never logs these, but if one ever slips into a message
     (or an exception text) it is masked before it reaches app.log."""
-    key = os.environ.get("FINNHUB_API_KEY", "").strip()
-    if key and key in text:
-        text = text.replace(key, "[REDACTED_KEY]")
+    if not text:
+        return text
+    all_keys = set(_EXTRA_KEYS_TO_REDACT)
+    try:
+        from config import get_api_keys
+        all_keys.update(get_api_keys())
+    except Exception:
+        pass
+    for env_var in ("FINNHUB_API_KEY", "FINNHUB_API_KEYS"):
+        raw = os.environ.get(env_var, "")
+        if raw:
+            for part in re.split(r"[,;\s]+", raw):
+                clean_k = part.strip().strip('"\'').strip()
+                if len(clean_k) >= 4:
+                    all_keys.add(clean_k)
+
+    for key in sorted(all_keys, key=len, reverse=True):
+        if key in text:
+            text = text.replace(key, "[REDACTED_KEY]")
     text = _TOKEN_HEADER.sub(r"\1[REDACTED_KEY]", text)
     text = _TOKEN_QUERY.sub(r"\1[REDACTED_KEY]", text)
     return _SENSITIVE_FIELD.sub(lambda m: f"{m.group(2)}{m.group(3)}[REDACTED]", text)

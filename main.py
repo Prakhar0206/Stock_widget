@@ -118,6 +118,8 @@ def build_runtime(args, environ=os.environ) -> Runtime:
                        [DEMO_BANNER] + warnings, "Local\\StockAlertWidget_SingleInstance_DEMO", True)
     keys = env_keys or list(cfg.api_keys)                    # env wins; config.json "api_keys" is the fallback
     if keys:
+        from store import register_keys_for_redaction
+        register_keys_for_redaction(keys)
         cfg, warnings = enforce_budget(cfg, folder, len(keys), warnings)
     provider = FinnhubProvider(keys) if keys else MockProvider({})
     return Runtime(cfg, folder, provider, bool(keys), None, warnings, "Local\\StockAlertWidget_SingleInstance", False,
