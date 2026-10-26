@@ -254,13 +254,15 @@ def get_api_key(environ: Optional[dict[str, str]] = None) -> Optional[str]:
 
 
 def get_api_keys(environ: Optional[dict[str, str]] = None) -> list[str]:
-    """Every Finnhub key found in FINNHUB_API_KEY, then FINNHUB_API_KEYS. Either may hold several
-    keys separated by commas, e.g. "key1, key2, key3, key4". Each key is cleaned like
-    clean_api_key(); empties and duplicates are dropped; order is kept. [] when nothing is set.
+    """Every Finnhub key found in FINNHUB_API_KEY, FINNHUB_API_KEYS, or numbered variables
+    FINNHUB_API_KEY_1 through FINNHUB_API_KEY_10. Any may hold several keys separated by commas,
+    e.g. "key1, key2, key3, key4". Each key is cleaned like clean_api_key(); empties and
+    duplicates are dropped; order is kept. [] when nothing is set.
     Never log, print or write these values."""
     env = os.environ if environ is None else environ
     keys: list[str] = []
-    for name in ("FINNHUB_API_KEY", "FINNHUB_API_KEYS"):
+    names = ["FINNHUB_API_KEY", "FINNHUB_API_KEYS"] + [f"FINNHUB_API_KEY_{i}" for i in range(1, 11)]
+    for name in names:
         for key in _split_keys(env.get(name)):
             if key not in keys:
                 keys.append(key)

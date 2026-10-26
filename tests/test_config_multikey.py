@@ -18,6 +18,11 @@ def test_get_api_keys_reads_both_variables_dedupes_and_orders():
     assert get_api_keys(env) == ["a", "b", "c", "d"]
 
 
+def test_get_api_keys_reads_numbered_variables():
+    env = {"FINNHUB_API_KEY_1": "k1", "FINNHUB_API_KEY_2": "k2", "FINNHUB_API_KEY_3": "k3", "FINNHUB_API_KEY_4": "k4"}
+    assert get_api_keys(env) == ["k1", "k2", "k3", "k4"]
+
+
 def test_get_api_keys_empty_cases():
     assert get_api_keys({}) == []
     assert get_api_keys({"FINNHUB_API_KEY": '  "" ', "FINNHUB_API_KEYS": " , ; "}) == []

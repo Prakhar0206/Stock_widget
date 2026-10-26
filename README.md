@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-248%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-249%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -98,8 +98,13 @@ For a single key, the widget safely polls once every 60 seconds. To enable **15-
 You can set them globally via PowerShell environment variables (recommended) or in your `config.json`:
 
 ### Via Windows Environment Variables (Recommended)
-Open PowerShell and run:
+Open PowerShell and set your 4 keys either comma-separated (recommended) or individually:
+
 ```powershell
+# Option A: Comma-separated (easiest)
+setx FINNHUB_API_KEY "key1,key2,key3,key4"
+
+# Option B: Individual numbered variables
 setx FINNHUB_API_KEY_1 "your_finnhub_key_1"
 setx FINNHUB_API_KEY_2 "your_finnhub_key_2"
 setx FINNHUB_API_KEY_3 "your_finnhub_key_3"
@@ -208,18 +213,18 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 248 items
+collected 249 items
 
 tests/test_app_core.py .......................                           [  9%]
-tests/test_config_multikey.py .................                          [ 16%]
-tests/test_config_store.py ...................                           [ 23%]
+tests/test_config_multikey.py ..................                         [ 16%]
+tests/test_config_store.py ...................                           [ 24%]
 tests/test_data_checks.py .......                                        [ 26%]
 tests/test_desktop_layer_stub.py .........                               [ 30%]
 tests/test_engine.py .......................                             [ 39%]
 tests/test_finnhub_pool.py ...........................                   [ 50%]
 tests/test_finnhub_scheduler.py ...................                      [ 58%]
 tests/test_main_demo.py ........                                         [ 61%]
-tests/test_main_multikey.py .........                                    [ 64%]
+tests/test_main_multikey.py .........                                    [ 65%]
 tests/test_market_clock.py ......                                        [ 67%]
 tests/test_market_clock_rules.py .......                                 [ 70%]
 tests/test_notifier.py ................                                  [ 76%]
@@ -231,7 +236,7 @@ tests/test_startup_shortcut.py ..                                        [ 85%]
 tests/test_ui_smoke.py ....................                              [ 93%]
 tests/test_zones.py ................                                     [100%]
 
-============================ 248 passed in 8.2s ===============================
+============================ 249 passed in 10.2s ==============================
 ```
 
 ---
