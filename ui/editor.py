@@ -12,7 +12,7 @@ from typing import Callable, Optional
 from market_clock import IST
 from models import Alert, CATEGORIES, LABELS, MODES, PRIORITIES, PlannedEntry, Position, StockConfig, ValidationError
 from positions import position_summary, price_from_pct, pct_from_price, q2, stock_base
-from ui.common import (ACCENT, AMBER, BG, BG2, FG, GREEN, MUTED, RED, button, check, entry, fmt_pct, label, menu,
+from ui.common import (ACCENT, BG, BG2, FG, GREEN, MUTED, RED, button, check, entry, fmt_pct, label, menu,
                        parse_dec)
 from watchlist import parse_alert
 from zones import ZONE_DEFAULTS, TAGS, editor_rows

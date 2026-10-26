@@ -6,9 +6,9 @@ from decimal import Decimal
 from typing import Optional
 
 from config import Config, check_budget, BudgetError
-from models import (ALERT_TYPES, CATEGORIES, DEFAULT_LABEL_BY_CATEGORY, LABELS, LEVEL_TYPES, MODES,
+from models import (ALERT_TYPES, CATEGORIES, DEFAULT_LABEL_BY_CATEGORY, LABELS, MODES,
                     PRIORITIES, Alert, PlannedEntry, Position, StockConfig, ValidationError, Watchlist)
-from zones import THRESHOLD_KEYS, ZONE_DEFAULTS, check_thresholds, TAGS
+from zones import ZONE_DEFAULTS, check_thresholds
 
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 PCT_MIN, PCT_MAX = Decimal(-90), Decimal(500)

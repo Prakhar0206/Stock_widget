@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Optional
 
 from config import Config
-from data_checks import ACCEPTED, IGNORED, PAUSED, PriceFilter
+from data_checks import IGNORED, PAUSED, PriceFilter
 from market_clock import Session
 from models import (ARMED, COOLDOWN, DISABLED, DISARMED, DONE, LEVEL_TYPES, PRIORITY_RANK, WAIT_CROSS,
                     Alert, AlertEvent, PriceTick, StockConfig)

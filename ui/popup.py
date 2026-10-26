@@ -5,7 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Callable, Optional
 
-from ui.common import BG, FG, FONT, FONT_B, PRIO_COLORS, button
+from ui.common import FG, FONT, PRIO_COLORS, button
 
 
 class AlertPopup:

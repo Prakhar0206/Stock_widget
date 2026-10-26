@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from config import Config
-from models import AlertEvent, Watchlist, ValidationError
+from models import AlertEvent, Watchlist
 from watchlist import dump_watchlist, parse_watchlist
 
 log = logging.getLogger("saw.store")

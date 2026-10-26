@@ -14,8 +14,6 @@ from ctypes import wintypes
 if sys.platform != "win32":
     raise ImportError("desktop_layer only runs on Windows")
 
-from ui.common import TRANSPARENT_KEY
-
 PEEK_KEY = "W"              # held together with Alt (carried over from the clock; it works)
 QUIT_KEY = "Q"              # Ctrl+Alt+Shift+<key> exits (carried over from the clock)
 KEY_POLL_MS = 40            # how often peek state is checked (clock used 25)
