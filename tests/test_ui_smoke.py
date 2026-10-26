@@ -330,3 +330,19 @@ def test_add_dialog_refuses_when_the_watchlist_is_full(app, monkeypatch):
     assert seen and seen[0][0] == "Watchlist full"
     assert "max_symbols = 2" in seen[0][1] and "48 calls per minute" in seen[0][1] and "config.json" in seen[0][1]
     assert ed_mod.watchlist_full_message(30, 30).startswith("The watchlist already has 30 stocks")
+
+
+def test_heartbeat_pulse_animation_runs_smoothly(app):
+    root, ctrl, view, layer, st, quits = app
+    # Canvas should have both core and ring items
+    assert view._hb_core_id is not None
+    assert view._hb_ring_id is not None
+    # Trigger pulse animation
+    view.pulse_heartbeat()
+    assert view._pulse_job is not None
+    # Step through animation frames
+    for _ in range(12):
+        root.after(40)
+        root.update()
+    # At completion of sequence, pulse job clears cleanly
+    assert view._pulse_job is None

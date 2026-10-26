@@ -245,8 +245,13 @@ class WidgetView:
         self._idle_job = None
         self._clock_job = None
         self._pulse_job = None
-        self._pulsing = False
         self._last_seen_heartbeat = None
+        self._hb_core_id = None
+        self._hb_ring_id = None
+        self._hb_center = (0, 0)
+        self._hb_base_r = 4.5
+        self._hb_color = "green"
+        self._hb_dim = False
         self.tooltips: dict[str, str] = {}         # canvas tag -> tooltip text
         self._active_tooltip_tag: str | None = None
         self._tip_win: tk.Toplevel | None = None
@@ -344,25 +349,91 @@ class WidgetView:
             return ""
         return self.tooltips.get(self._active_tooltip_tag, "")
 
+    def pulse_heartbeat(self):
+        """Manually trigger the pulse animation (useful for testing or demo)."""
+        self._trigger_heartbeat_pulse()
+
     def _trigger_heartbeat_pulse(self) -> None:
-        """Pulse the heartbeat dot softly on each new successful fetch."""
-        self._pulsing = True
+        """Trigger an expanding sonar ripple and organic core bloom on fetch."""
         if self._pulse_job is not None:
             try:
                 self.root.after_cancel(self._pulse_job)
             except tk.TclError:
                 pass
-
-        def end_pulse():
             self._pulse_job = None
-            self._pulsing = False
-            if not self.editing:
-                self.render()
 
-        try:
-            self._pulse_job = self.root.after(450, end_pulse)
-        except tk.TclError:
-            self._pulsing = False
+        if self.editing or self._hb_core_id is None:
+            return
+
+        cx, cy = self._hb_center
+        base_r = self._hb_base_r
+        col = self._hb_color
+        dim = self._hb_dim
+
+        # Animation frames: (core_radius_boost, core_color, ring_radius, ring_outline_color, ring_width)
+        if dim:
+            frames = [
+                (1.8, "#22C55E", base_r + 2.0, "#1E5631", 2),
+                (1.4, "#1E5631", base_r + 4.5, "#166534", 1.5),
+                (0.8, "#1E5631", base_r + 7.0, "#14532D", 1.0),
+                (0.4, "#1E5631", base_r + 9.5, "#052E16", 1.0),
+                (0.0, DIM_DOT_COLORS.get(col, DIM), 0.0, "", 0),
+            ]
+        elif col == "red":
+            frames = [
+                (3.2, "#FECACA", base_r + 2.0, "#F87171", 2.5),
+                (2.6, "#F87171", base_r + 4.5, "#EF4444", 2.0),
+                (2.0, "#EF4444", base_r + 7.5, "#DC2626", 2.0),
+                (1.4, "#DC2626", base_r + 10.5, "#B91C1C", 1.5),
+                (0.8, "#DC2626", base_r + 13.5, "#991B1B", 1.5),
+                (0.4, "#DC2626", base_r + 16.0, "#7F1D1D", 1.0),
+                (0.1, "#DC2626", base_r + 18.0, "#450A0A", 1.0),
+                (0.0, RED, 0.0, "", 0),
+            ]
+        elif col == "amber":
+            frames = [
+                (3.2, "#FEF3C7", base_r + 2.0, "#FBBF24", 2.5),
+                (2.6, "#FBBF24", base_r + 4.5, "#F59E0B", 2.0),
+                (2.0, "#F59E0B", base_r + 7.5, "#D97706", 2.0),
+                (1.4, "#D97706", base_r + 10.5, "#B45309", 1.5),
+                (0.8, "#D97706", base_r + 13.5, "#92400E", 1.5),
+                (0.4, "#D97706", base_r + 16.0, "#78350F", 1.0),
+                (0.1, "#D97706", base_r + 18.0, "#451A03", 1.0),
+                (0.0, AMBER, 0.0, "", 0),
+            ]
+        else:  # vivid emerald green live heartbeat
+            frames = [
+                (3.2, "#DCFCE7", base_r + 2.5, "#86EFAC", 2.5),
+                (2.6, "#86EFAC", base_r + 5.0, "#4ADE80", 2.0),
+                (2.0, "#4ADE80", base_r + 8.0, "#22C55E", 2.0),
+                (1.4, "#22C55E", base_r + 11.0, "#16A34A", 1.5),
+                (0.8, "#22C55E", base_r + 14.0, "#15803D", 1.5),
+                (0.4, "#22C55E", base_r + 16.5, "#166534", 1.0),
+                (0.1, "#22C55E", base_r + 18.5, "#14532D", 1.0),
+                (0.0, GREEN, 0.0, "", 0),
+            ]
+
+        def step(idx: int):
+            if idx >= len(frames) or self.editing:
+                self._pulse_job = None
+                return
+            boost, c_col, r_rad, r_col, r_w = frames[idx]
+            try:
+                if self._hb_core_id and self.canvas.winfo_exists():
+                    cr = base_r + boost
+                    self.canvas.coords(self._hb_core_id, cx - cr, cy - cr, cx + cr, cy + cr)
+                    self.canvas.itemconfig(self._hb_core_id, fill=c_col)
+                    if r_rad > 0 and r_col:
+                        self.canvas.coords(self._hb_ring_id, cx - r_rad, cy - r_rad, cx + r_rad, cy + r_rad)
+                        self.canvas.itemconfig(self._hb_ring_id, outline=r_col, width=r_w)
+                    else:
+                        self.canvas.itemconfig(self._hb_ring_id, outline="", width=0)
+
+                self._pulse_job = self.root.after(35, lambda: step(idx + 1))
+            except tk.TclError:
+                self._pulse_job = None
+
+        step(0)
 
     def render(self) -> tuple:
         """Draw the corner status strip and stock rows, then fit the window. Returns (width, height)."""
@@ -375,9 +446,17 @@ class WidgetView:
         rows = self.ctrl.row_views(now)
         warns = self.ctrl.all_warnings()
 
-        if strip.last_heartbeat_at is not None and strip.last_heartbeat_at != self._last_seen_heartbeat:
+        # Cancel any in-flight pulse before clearing canvas
+        if self._pulse_job is not None:
+            try:
+                self.root.after_cancel(self._pulse_job)
+            except tk.TclError:
+                pass
+            self._pulse_job = None
+
+        new_fetch = (strip.last_heartbeat_at is not None and strip.last_heartbeat_at != self._last_seen_heartbeat)
+        if new_fetch:
             self._last_seen_heartbeat = strip.last_heartbeat_at
-            self._trigger_heartbeat_pulse()
 
         c.delete("all")
         self.tooltips.clear()
@@ -409,23 +488,36 @@ class WidgetView:
         self._bind_tooltip(sun_moon_tag, strip.session_tooltip)
         hx = c.bbox(sm_item)[2] + 10
 
-        # 2. Heartbeat Dot
+        # 2. Heartbeat Dot & Sonar Ripple Wave
         hb_tag = "status_heartbeat"
-        base_r = max(4, lh // 4)
-        r_ = base_r + (1 if self._pulsing else 0)
-        if strip.heartbeat_dim:
-            dot_col = DIM_DOT_COLORS.get(strip.heartbeat_color, DIM)
-        elif self._pulsing:
-            dot_col = PULSE_DOT_COLORS.get(strip.heartbeat_color, GREEN)
-        else:
-            dot_col = {"green": GREEN, "amber": AMBER, "red": RED}.get(strip.heartbeat_color, GREY)
+        base_r = max(4.5, min(6.0, lh / 3.8))
+        self._hb_base_r = base_r
+        self._hb_color = strip.heartbeat_color
+        self._hb_dim = strip.heartbeat_dim
 
-        c.create_oval(
-            hx, mid - r_, hx + 2 * r_, mid + r_,
-            fill=dot_col, outline="", tags=(hb_tag,)
+        # Dedicated arena for expanding sonar ripple
+        cx = hx + int(base_r + 6)
+        cy = mid
+        self._hb_center = (cx, cy)
+
+        if strip.heartbeat_dim:
+            core_col = DIM_DOT_COLORS.get(strip.heartbeat_color, DIM)
+        else:
+            core_col = {"green": GREEN, "amber": AMBER, "red": RED}.get(strip.heartbeat_color, GREY)
+
+        # Expanding Ripple Ring (under the core dot)
+        self._hb_ring_id = c.create_oval(
+            cx - base_r, cy - base_r, cx + base_r, cy + base_r,
+            outline="", width=0, tags=(hb_tag, "status_heartbeat_ring")
+        )
+
+        # Solid Core Dot
+        self._hb_core_id = c.create_oval(
+            cx - base_r, cy - base_r, cx + base_r, cy + base_r,
+            fill=core_col, outline="", tags=(hb_tag,)
         )
         self._bind_tooltip(hb_tag, strip.heartbeat_tooltip)
-        hx += 2 * r_ + 10
+        hx = cx + int(base_r + 10)
 
         # 3. Direct Clocks (IST | NY) - visible without requiring hover
         clock_str = f"{hv.ist}  |  {hv.ny}"
@@ -490,6 +582,8 @@ class WidgetView:
         total_h = y + pad + (lk["shadow_offset"] if lk["shadow_color"] else 0)
         c.config(width=total_w, height=total_h)
         self.layer.fit(total_w, total_h)
+        if new_fetch:
+            self._trigger_heartbeat_pulse()
         return total_w, total_h
 
     # ---- clock tick: refresh status & age tooltips -----------------------------------------------
