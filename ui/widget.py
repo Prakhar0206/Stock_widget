@@ -32,30 +32,6 @@ def merged_look(cfg_look: dict) -> dict:
     return look
 
 
-class SummaryWindow(tk.Toplevel):
-    def __init__(self, master, card: dict):
-        super().__init__(master, bg=BG)
-        self.title(f"Daily summary {card['date']}")
-        self.attributes("-topmost", True)
-        lines = [f"Daily summary for {card['date']}" + ("  (built after close)" if card.get("built_after_close") else ""),
-                 "Estimates are before tax.", ""]
-        for s in card["stocks"]:
-            head = f"{s['symbol']} · {s['category']} · last {s['last_price'] or 'n/a'}"
-            if "change_today" in s:
-                head += f" · today {s['change_today']} ({s['change_today_pct']}%)"
-            lines.append(head)
-            if s["category"] in ("HOLD", "SELL"):
-                lines.append(f"    zone: {s.get('zone') or '-'} · est. net P/L: {s.get('est_net_pl') or 'n/a'}")
-            for a in s.get("alerts_fired", []):
-                lines.append(f"    alert {a['alert_id']} [{a['priority']}] at {a['price']} ({a['time'][11:16]} UTC)")
-        t = tk.Text(self, bg=BG2, fg=FG, font=("Consolas", 10), width=76, height=min(30, len(lines) + 1), relief="flat")
-        t.insert("1.0", "\n".join(lines))
-        t.config(state="disabled")
-        t.pack(padx=10, pady=10)
-        button(self, "Close", self.destroy).pack(pady=(0, 10))
-        self.bind("<Escape>", lambda e: self.destroy())
-
-
 class EditPanel(tk.Frame):
     """Header buttons, the stock list (one row open at a time) and the expanded section."""
 
@@ -69,10 +45,8 @@ class EditPanel(tk.Frame):
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", padx=10, pady=(10, 4))
         button(top, "+ Add stock", self._add, bg="#3B82F6").pack(side="left")
-        self.btn_summary = button(top, "Summary", self._summary)
-        self.btn_summary.pack(side="left", padx=6)
         self.btn_mute = button(top, "", self._mute)
-        self.btn_mute.pack(side="left")
+        self.btn_mute.pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
@@ -161,12 +135,6 @@ class EditPanel(tk.Frame):
         self.open_symbol = symbol                  # open it so alerts can be added (blueprint 9.6 step 4)
         self.rebuild()
 
-    def _summary(self):
-        card = self.ctrl.open_summary()
-        if card:
-            SummaryWindow(self.view.root, card)
-        self.refresh()
-
     def _mute(self):
         self.ctrl.notifier.toggle_mute()
         self.refresh()
@@ -185,7 +153,6 @@ class EditPanel(tk.Frame):
                  + ("  · MUTED" if hv.muted else "")
         )
         self.lbl_warn.config(text="\n".join(self.ctrl.all_warnings()))
-        self.btn_summary.config(text="Summary ●" if hv.summary_dot else "Summary")
         self.btn_mute.config(text="Unmute" if hv.muted else "Mute")
         flashing = self.view.flashing()
         for rv in self.ctrl.row_views(now):
@@ -543,12 +510,6 @@ class WidgetView:
             self._bind_tooltip(otag, strip.overflow_tooltip or f"{strip.overflow_count} more problem(s)")
             hx = c.bbox(o_item)[2] + 10
 
-        if hv.summary_dot:
-            stag = "status_summary"
-            c.create_oval(hx, mid - base_r, hx + 2 * base_r, mid + base_r, fill="#60A5FA", outline="", tags=(stag,))
-            self._bind_tooltip(stag, "New daily summary available")
-            hx += 2 * base_r + 8
-
         if hv.muted:
             mtag = "status_muted"
             m_item = self._t(hx, y, "🔇", AMBER, self.fs, tags=(mtag,))
@@ -626,7 +587,7 @@ class WidgetView:
         if not self.editing:
             return
         for w in list(self.root.winfo_children()):
-            if isinstance(w, (AlertDialog, ChoiceDialog, AddStockDialog, SummaryWindow)):
+            if isinstance(w, (AlertDialog, ChoiceDialog, AddStockDialog)):
                 w.destroy()
         self.panel.destroy()
         self.panel = None

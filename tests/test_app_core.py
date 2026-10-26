@@ -189,44 +189,6 @@ def test_update_removing_alert_and_remove_stock_clean_state(tmp_path):
     assert "ttwo" not in st.watchlist_path.read_text().lower()
 
 
-def test_daily_summary_at_close_dot_until_opened(tmp_path):
-    c, rec, st = make(tmp_path)
-    feed(c, T0, AAPL=("207.50", "200"), TTWO=("205", "206"))
-    feed(c, T0 + timedelta(minutes=1), AAPL=("212", "200"), TTWO=("205", "206"))
-    close = datetime(2026, 10, 14, 20, 0, tzinfo=timezone.utc)
-    c.housekeeping(close - timedelta(seconds=5)); assert not c.summary_unseen and not (st.dir / "summaries" / "2026-10-14.json").exists()
-    c.housekeeping(close + timedelta(seconds=5))
-    assert c.summary_unseen and c.header(close).summary_dot
-    card = json.loads((st.dir / "summaries" / "2026-10-14.json").read_text())
-    assert card["built_after_close"] is False
-    a = next(s for s in card["stocks"] if s["symbol"] == "AAPL")
-    assert a["last_price"] == "212.00" and a["category"] == "SELL" and a["zone"] == "High sell zone"
-    assert Dc(a["est_net_pl"]) > 0
-    assert {x["alert_id"] for x in a["alerts_fired"]} >= {"aapl-target"}
-    assert not any("summary" in l for l in st.alert_log_path.read_text().splitlines())   # not in the alert log
-    feed(c, close + timedelta(minutes=30), AAPL=("150", "200"), TTWO=("205", "206"))   # after-hours poll
-    c.housekeeping(close + timedelta(minutes=31)); assert len(list((st.dir / "summaries").iterdir())) == 1
-    assert json.loads((st.dir / "summaries" / "2026-10-14.json").read_text())["stocks"][0]["last_price"] == "212.00"
-    card2 = c.open_summary()
-    assert card2["date"] == "2026-10-14" and not c.summary_unseen
-
-
-def test_summary_built_after_close_when_pc_was_off(tmp_path):
-    c, rec, st = make(tmp_path)
-    feed(c, T0, AAPL=("207.50", "200"), TTWO=("205", "206"))
-    c2 = AppController(Config(), st, MockProvider({}), Rec(), now_fn=lambda: T0)       # restart next morning
-    morning = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
-    c2.housekeeping(morning)
-    card = json.loads((st.dir / "summaries" / "2026-10-14.json").read_text())
-    assert card["built_after_close"] is True and c2.summary_unseen
-
-
-def test_no_summary_when_nothing_was_ever_read(tmp_path):
-    c, rec, st = make(tmp_path)
-    c.housekeeping(datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc))
-    assert list((st.dir / "summaries").iterdir()) == []
-
-
 def test_missing_api_key_message_and_header(tmp_path):
     c, rec, st = make(tmp_path, polling_enabled=False)
     assert any("FINNHUB_API_KEY" in w for w in c.all_warnings())
@@ -339,7 +301,6 @@ def test_daily_move_percent_is_limited_to_500_and_demo_session_override(tmp_path
     assert c.session(sat) == Session.REGULAR and c.header(sat).market == "OPEN"
     feed(c, sat, AAPL=("207.50", "200"), TTWO=("205", "206"))
     c.housekeeping(datetime(2026, 10, 15, 12, 0, tzinfo=tz.utc))
-    assert list((st.dir / "summaries").iterdir()) == []                # demo mode never writes summaries
 
 
 def test_session_transition_triggers_instant_poll(tmp_path):

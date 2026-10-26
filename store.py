@@ -79,7 +79,6 @@ class Store:
     def __init__(self, folder: Path):
         self.dir = Path(folder)
         self.dir.mkdir(parents=True, exist_ok=True)
-        (self.dir / "summaries").mkdir(exist_ok=True)
         self.watchlist_path = self.dir / "watchlist.json"
         self.last_good_path = self.dir / "watchlist.last_good.json"
         self.state_path = self.dir / "state.json"
@@ -189,7 +188,7 @@ class Store:
         Kept lines are copied byte-for-byte, so the JSONL schema is untouched. The file is replaced
         atomically. With archive=True the removed lines are first appended to
         alerts_archive/alerts_log_YYYY-MM.jsonl (same fields only; nothing sensitive is in the log).
-        Unreadable lines are discarded. Call at startup and/or after the daily summary."""
+        Unreadable lines are discarded. Call at startup and/or periodically."""
         if max_age_days < 0:
             raise ValueError("max_age_days must be >= 0")
         now = now or datetime.now(timezone.utc)
@@ -233,14 +232,6 @@ class Store:
                 f.write("".join(l + "\n" for l in lines))
                 f.flush()
                 os.fsync(f.fileno())
-
-    # ---- summaries ---------------------------------------------------------------------------
-    def save_summary(self, date_str: str, card: dict) -> Path:
-        if not date_str or any(c in date_str for c in "/\\") or ".." in date_str:
-            raise ValueError(f"invalid summary date: {date_str!r}")
-        p = self.dir / "summaries" / f"{date_str}.json"
-        atomic_write_json(p, card)
-        return p
 
 
 _SENSITIVE_FIELD = re.compile(

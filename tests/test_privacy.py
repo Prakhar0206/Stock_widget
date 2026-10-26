@@ -34,7 +34,6 @@ def test_15_no_key_no_position_data_in_written_files(tmp_path, monkeypatch):
             st.log_alert(ev)                                    # logged first ...
             format_message(ev, f.t)                             # ... then notified
     st.save_state(e.state)
-    st.save_summary("2026-10-14", {"date": "2026-10-14", "stocks": []})
     import logging
     logging.getLogger("saw.test").info("polled AAPL price 131 ok")
 

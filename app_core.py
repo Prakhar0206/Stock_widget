@@ -18,7 +18,6 @@ from models import ARMED, DISABLED, DONE, AlertEvent, PriceTick, StockConfig, Va
 from positions import q2
 from scheduler import CLOSED_POLL_S
 from store import Store
-from summary import build_card
 from watchlist import ensure_slipping_alert
 from zones import TAGS
 
@@ -76,7 +75,6 @@ class HeaderView:
     ny: str
     feed_dot: str       # green | amber | red
     feed_text: str
-    summary_dot: bool
     muted: bool
     # Redesigned status strip fields attached for direct access
     session_icon: str = "🌙"
@@ -255,7 +253,7 @@ class AppController:
             log.exception("notification failed")      # a broken backend never stops evaluation
 
     def housekeeping(self, now: datetime) -> None:
-        """Call every few seconds: stale-feed alert (>3 min offline during market hours), summary at the close."""
+        """Call every few seconds: stale-feed alert (>3 min offline during market hours)."""
         self._check_provider_invalid_keys(now)
         session = self.session(now)
         self.feed.note_session(session == Session.REGULAR, now)
@@ -265,51 +263,12 @@ class AppController:
                 self.dispatch([AlertEvent("FEED", "feed-stale", "feed_stale", "RISK", "MEDIUM", Decimal(0), now,
                                           "finnhub", condition="Feed offline: price data is stale",
                                           note="Feed offline: price data is stale")])
-        self._maybe_summary(now)
 
     def on_wake(self, now: datetime) -> None:
         """Wake, unlock or remote-desktop reconnect: poll immediately. Old prices never fire alerts,
         because alerts are only evaluated on readings that arrive after this."""
         self.feed.reset_clock(now)
         self.poll_now()
-        self._maybe_summary(now)
-
-    # ---- summary -------------------------------------------------------------------------------
-    def _maybe_summary(self, now: datetime) -> None:
-        if self.session_override is not None:
-            return                                   # demo mode: no (fake) summary cards
-        close = self.calendar.last_close_before(now)
-        if close is None:
-            return
-        day = close.date().isoformat()
-        if (self.store.dir / "summaries" / f"{day}.json").exists():
-            return
-        lr = self.engine.state.get("last_regular", {})
-        if not any(lr.get(s.symbol) and datetime.fromisoformat(lr[s.symbol]["time"]).astimezone(ET).date().isoformat() == day
-                   for s in self.wl.symbols):
-            return                                   # no regular-session reading that day: no card
-        after = now - close > timedelta(minutes=10)
-        card = build_card(self.wl, self.engine.state, self.store.read_alert_log(), close, self.cfg, now, after)
-        self.store.save_summary(day, card)
-        self.engine.state["summary"] = {"latest": day, "unseen": True}
-        self._save_state()
-
-    @property
-    def summary_unseen(self) -> bool:
-        return bool(self.engine.state.get("summary", {}).get("unseen"))
-
-    def open_summary(self) -> Optional[dict]:
-        """Returns the latest card and clears the header dot."""
-        import json
-        day = self.engine.state.get("summary", {}).get("latest")
-        if not day:
-            return None
-        p = self.store.dir / "summaries" / f"{day}.json"
-        if not p.exists():
-            return None
-        self.engine.state["summary"]["unseen"] = False
-        self._save_state()
-        return json.loads(p.read_text(encoding="utf-8"))
 
     # ---- watchlist edits (save first; memory changes only if the save worked) --------------------
     def _commit(self, cand: Watchlist) -> None:
@@ -613,7 +572,6 @@ class AppController:
             ny=now.astimezone(ET).strftime("%H:%M ET"),
             feed_dot=dot,
             feed_text=text,
-            summary_dot=self.summary_unseen,
             muted=self.notifier.muted,
             session_icon=strip.session_icon,
             heartbeat_dim=strip.heartbeat_dim,

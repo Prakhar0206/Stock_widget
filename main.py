@@ -249,7 +249,7 @@ def run(argv=None) -> None:
             names = {HK_EDIT: "Alt+Shift+W", HK_ACK: "Alt+A", HK_MUTE: "Alt+M"}
             for hid in failed:
                 ctrl.warnings.append(f"Hotkey {names[hid]} is used by another program and was not registered.")
-        ctrl.housekeeping(utcnow())                 # catch-up summary if the PC was off at the close
+        ctrl.housekeeping(utcnow())
         view.start_clock()
         if rt.polling:
             sched.start()

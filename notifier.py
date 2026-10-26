@@ -1,6 +1,6 @@
 """Delivery rules (blueprint section 7). Backends and timers are injected, so the rules are testable
-without Windows. Mute silences sounds and toasts; a HIGH pop-up still appears (silently), and rows,
-log and summary keep updating. Quiet hours (IST): pop-ups still appear but make no sound."""
+without Windows. Mute silences sounds and toasts; a HIGH pop-up still appears (silently), and rows
+and alert log keep updating. Quiet hours (IST): pop-ups still appear but make no sound."""
 from __future__ import annotations
 
 import logging

@@ -262,20 +262,6 @@ def test_remove_stock_with_confirmation(app, monkeypatch):
     assert "TTWO" not in ctrl.engine.state["symbols"]
 
 
-def test_summary_button_clears_dot(app):
-    root, ctrl, view, layer, st, quits = app
-    close = datetime(2026, 10, 14, 20, 0, 5, tzinfo=timezone.utc)
-    ctrl.housekeeping(close)
-    assert ctrl.summary_unseen
-    view.enter_edit()
-    view.panel._summary(); root.update()
-    assert not ctrl.summary_unseen
-    from ui.widget import SummaryWindow
-    assert any(isinstance(w, SummaryWindow) for w in root.winfo_children())
-    view.exit_edit()
-    assert not any(isinstance(w, SummaryWindow) for w in root.winfo_children())   # dialogs close with edit mode
-
-
 def test_edit_panel_resizes_window_within_screen(app):
     root, ctrl, view, layer, st, quits = app
     view.enter_edit(); root.update(); view.panel._resize()

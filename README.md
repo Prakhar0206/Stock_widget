@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-252%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-248%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -168,7 +168,6 @@ stock_alert_widget/
 ├── positions.py             # Position calculations, buy/sell fees, net P/L estimates
 ├── notifier.py              # Windows toast integration, sound player, pop-up dispatcher
 ├── store.py                 # File storage, atomic JSON writes, privacy log filter
-├── summary.py               # End-of-day summary generator (kept in summaries/)
 ├── providers/
 │   ├── finnhub.py           # Multi-key pool rotation, in-slot failover, 429 backoff
 │   └── mock.py              # Demo/mock provider with scripted price trajectories
@@ -194,7 +193,6 @@ All runtime and persistent user data is kept isolated in `%APPDATA%\StockAlertWi
 | `state.json` | Runtime state, last seen prices, and daily close benchmarks. |
 | `alerts_log.jsonl` | Append-only alert log (redacted: no shares, cost basis, or profits). |
 | `app.log` | Rotating operational log (1 MB $\times$ 3 files, strict key/PII redaction). |
-| `summaries/` | Daily performance cards generated after regular session close. |
 
 ---
 
@@ -210,18 +208,18 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 252 items
+collected 248 items
 
-tests/test_app_core.py ..........................                        [ 10%]
-tests/test_config_multikey.py .................                          [ 17%]
-tests/test_config_store.py ...................                           [ 24%]
-tests/test_data_checks.py .......                                        [ 27%]
+tests/test_app_core.py .......................                           [  9%]
+tests/test_config_multikey.py .................                          [ 16%]
+tests/test_config_store.py ...................                           [ 23%]
+tests/test_data_checks.py .......                                        [ 26%]
 tests/test_desktop_layer_stub.py .........                               [ 30%]
-tests/test_engine.py .......................                             [ 40%]
+tests/test_engine.py .......................                             [ 39%]
 tests/test_finnhub_pool.py ...........................                   [ 50%]
 tests/test_finnhub_scheduler.py ...................                      [ 58%]
 tests/test_main_demo.py ........                                         [ 61%]
-tests/test_main_multikey.py .........                                    [ 65%]
+tests/test_main_multikey.py .........                                    [ 64%]
 tests/test_market_clock.py ......                                        [ 67%]
 tests/test_market_clock_rules.py .......                                 [ 70%]
 tests/test_notifier.py ................                                  [ 76%]
@@ -230,10 +228,10 @@ tests/test_positions.py .......                                          [ 81%]
 tests/test_privacy.py ......                                             [ 83%]
 tests/test_replay_soak.py ..                                             [ 84%]
 tests/test_startup_shortcut.py ..                                        [ 85%]
-tests/test_ui_smoke.py .....................                             [ 93%]
+tests/test_ui_smoke.py ....................                              [ 93%]
 tests/test_zones.py ................                                     [100%]
 
-============================ 252 passed in 10.5s ==============================
+============================ 248 passed in 8.2s ===============================
 ```
 
 ---
