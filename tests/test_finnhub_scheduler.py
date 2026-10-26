@@ -149,6 +149,14 @@ def test_outside_session_polls_every_15_minutes():
     assert sc.poll_once() == 900 and drain(q)[0][0] == "ticks"
 
 
+def test_outside_session_wakes_at_market_open():
+    from market_clock import ET
+    # Monday Oct 26 at 09:26 ET (4 minutes = 240 s before 09:30 ET regular open)
+    pre_open = datetime(2026, 10, 26, 9, 26, tzinfo=ET)
+    sc, mp, q = make({"AAPL": [100]}, now=pre_open)
+    assert sc.poll_once() == 240.0 and drain(q)[0][0] == "ticks"
+
+
 def test_budget_refusal_blocks_polling():
     from dataclasses import replace
     sc, mp, q = make({}, symbols=[f"S{i}" for i in range(30)])

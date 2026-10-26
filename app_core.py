@@ -114,6 +114,7 @@ class AppController:
         self.server_down: bool = False
         self.extra_problems: list[ProblemIconView] = []   # extensible for >3 simultaneous problem tests
         self._notified_invalid_keys: set[int] = set()
+        self._last_session: Optional[Session] = None
 
     @staticmethod
     def _run_inline(fn, cb):
@@ -155,10 +156,17 @@ class AppController:
         """Provider market status when it answered recently, else the bundled calendar."""
         if self.session_override is not None:
             return self.session_override
+        cal_sess = self.calendar.session_at(now)
         st = self.provider_status
         if st and self.provider_status_at and now - self.provider_status_at < timedelta(minutes=30):
+            # An explicit holiday closure from the provider overrides the calendar:
+            if st.get("holiday"):
+                return Session.CLOSED
             s = (st.get("session") or "").lower()
             if st.get("isOpen") and s in ("", "regular"):
+                return Session.REGULAR
+            # A pre-market status reading from before open cannot block regular trading hours:
+            if cal_sess == Session.REGULAR:
                 return Session.REGULAR
             if s == "pre-market":
                 return Session.PRE
@@ -166,7 +174,7 @@ class AppController:
                 return Session.AFTER
             if not st.get("isOpen"):
                 return Session.CLOSED
-        return self.calendar.session_at(now)
+        return cal_sess
 
     def on_ticks(self, ticks: list, now: datetime) -> None:
         self._check_provider_invalid_keys(now)
@@ -495,6 +503,10 @@ class AppController:
     def status_strip(self, now: datetime) -> StatusStripView:
         sess = self.session(now)
         regular = sess == Session.REGULAR
+        if self._last_session is not None and self._last_session != Session.REGULAR and regular:
+            log.info("Market opened: session switched to REGULAR, requesting immediate poll")
+            self.poll_now()
+        self._last_session = sess
         session_icon = "☀️" if regular else "🌙"
         session_tooltip = "US market open (regular session)" if regular else f"US market closed ({sess.value})"
 
@@ -541,6 +553,13 @@ class AppController:
                 rem_min = max(1, int(math.ceil(max(0.0, CLOSED_POLL_S - elapsed) / 60.0)))
             else:
                 rem_min = 15
+            nxt_open = getattr(self.calendar, "next_regular_open", None)
+            if callable(nxt_open):
+                t_open = nxt_open(now)
+                if t_open is not None:
+                    sec_to_open = (t_open - now).total_seconds()
+                    if 0 < sec_to_open < CLOSED_POLL_S:
+                        rem_min = max(1, int(math.ceil(sec_to_open / 60.0)))
             hb_tooltip = f"Market closed, next update in {rem_min} min"
         else:
             if hb_color == "red":

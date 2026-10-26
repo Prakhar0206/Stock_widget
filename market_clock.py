@@ -186,6 +186,15 @@ class MarketCalendar:
             return Session.AFTER
         return Session.CLOSED
 
+    def next_regular_open(self, when: datetime) -> Optional[datetime]:
+        """The first regular open strictly after `when` (aware ET), or None."""
+        et = when.astimezone(ET)
+        for i in range(_SEARCH_DAYS):
+            w = self.regular_window(et.date() + timedelta(days=i))
+            if w and w[0] > et:
+                return w[0]
+        return None
+
     def next_close(self, when: datetime) -> Optional[datetime]:
         """The first regular close strictly after `when` (aware ET), or None."""
         et = when.astimezone(ET)

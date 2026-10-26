@@ -15,7 +15,7 @@ from market_clock import utcnow
 # "monitor" is optional: None = stay on the monitor the widget is on, "primary", or a 0-based index
 # (0 = primary, then left-to-right). It is ignored when pos_x/pos_y are set.
 DEFAULT_LOOK = {"anchor": "top-right", "margin_x": 24, "margin_y": 24, "pos_x": None, "pos_y": None,
-                "monitor": None,
+                "monitor": None, "click_through": False,
                 "font": "Segoe UI", "size": 11, "text_color": "#FFFFFF", "shadow_color": "#000000",
                 "shadow_offset": 2, "background_mode": "transparent", "panel_color": "#202020",
                 "opacity": 0.92, "padding": 12}

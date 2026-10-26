@@ -53,3 +53,20 @@ def test_next_close_and_last_close():
     assert nxt.date() == date(2026, 11, 27) and hhmm(nxt) == "13:00"           # skips Thanksgiving
     last = CAL.last_close_before(datetime(2026, 10, 12, 12, 0, tzinfo=ET))      # Monday morning
     assert last.date() == date(2026, 10, 9) and hhmm(last) == "16:00"
+
+
+def test_next_regular_open():
+    # Monday 09:20 ET (before open) -> open today at 09:30 ET
+    before_open = datetime(2026, 10, 26, 9, 20, tzinfo=ET)
+    nxt = CAL.next_regular_open(before_open)
+    assert nxt is not None and nxt.date() == date(2026, 10, 26) and hhmm(nxt) == "09:30"
+
+    # Monday 10:00 ET (during regular hours) -> next open is Tuesday 09:30 ET
+    during_market = datetime(2026, 10, 26, 10, 0, tzinfo=ET)
+    nxt_tue = CAL.next_regular_open(during_market)
+    assert nxt_tue is not None and nxt_tue.date() == date(2026, 10, 27) and hhmm(nxt_tue) == "09:30"
+
+    # Wednesday before Thanksgiving (Nov 25) at 17:00 ET -> skips Thursday (Thanksgiving), opens Friday
+    wed_close = datetime(2026, 11, 25, 17, 0, tzinfo=ET)
+    nxt_fri = CAL.next_regular_open(wed_close)
+    assert nxt_fri is not None and nxt_fri.date() == date(2026, 11, 27) and hhmm(nxt_fri) == "09:30"

@@ -19,9 +19,13 @@ log = logging.getLogger("saw.scheduler")
 CLOSED_POLL_S = 900            # outside the regular session: every 15 minutes, display only
 
 
-def next_delay(regular: bool, now_epoch: float, poll_seconds: int, jitter: float) -> float:
-    """Regular session: aligned to the poll boundary (15 s slots or 60 s) plus jitter."""
+def next_delay(regular: bool, now_epoch: float, poll_seconds: int, jitter: float,
+               seconds_to_open: Optional[float] = None) -> float:
+    """Regular session: aligned to the poll boundary (15 s slots or 60 s) plus jitter.
+    Closed session: every 15 minutes, but never sleep past the regular market open."""
     if not regular:
+        if seconds_to_open is not None and 0 < seconds_to_open < CLOSED_POLL_S:
+            return max(1.0, float(seconds_to_open))
         return float(CLOSED_POLL_S)
     d = poll_seconds - (now_epoch % poll_seconds)
     if d < min(5, poll_seconds / 3):
@@ -103,7 +107,15 @@ class Scheduler(threading.Thread):
         now = self.now_fn()
         session = self.provider_session or self.calendar.session_at(now)
         regular = session == Session.REGULAR
-        nominal = next_delay(regular, self.epoch_fn(), self.cfg.poll_seconds, self.jitter_fn())
+        sec_to_open = None
+        if not regular:
+            nxt_open = getattr(self.calendar, "next_regular_open", None)
+            if callable(nxt_open):
+                t_open = nxt_open(now)
+                if t_open is not None:
+                    sec_to_open = (t_open - now).total_seconds()
+        nominal = next_delay(regular, self.epoch_fn(), self.cfg.poll_seconds, self.jitter_fn(),
+                             seconds_to_open=sec_to_open)
         symbols = list(self.get_symbols())
         if not symbols:
             return nominal

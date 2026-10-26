@@ -340,3 +340,24 @@ def test_daily_move_percent_is_limited_to_500_and_demo_session_override(tmp_path
     feed(c, sat, AAPL=("207.50", "200"), TTWO=("205", "206"))
     c.housekeeping(datetime(2026, 10, 15, 12, 0, tzinfo=tz.utc))
     assert list((st.dir / "summaries").iterdir()) == []                # demo mode never writes summaries
+
+
+def test_session_transition_triggers_instant_poll(tmp_path):
+    from market_clock import ET, Session
+    c, rec, st = make(tmp_path)
+    woke = []
+    c.poll_now = lambda: woke.append(1)
+
+    # 1. Closed/PRE market (09:29 ET)
+    t_pre = datetime(2026, 10, 26, 9, 29, tzinfo=ET)
+    c.status_strip(t_pre)
+    assert woke == []
+
+    # 2. Market opens (09:30 ET) -> transitions to Session.REGULAR -> immediate poll_now()!
+    t_open = datetime(2026, 10, 26, 9, 30, tzinfo=ET)
+    c.status_strip(t_open)
+    assert woke == [1]
+
+    # 3. Subsequent poll during open session does not re-trigger transition
+    c.status_strip(datetime(2026, 10, 26, 9, 31, tzinfo=ET))
+    assert woke == [1]
