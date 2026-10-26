@@ -19,6 +19,8 @@ htmlcov/
 # Logs and user data
 *.log
 local_config.json
+state.json
+alerts_log.jsonl
 
 # Operating System files
 .DS_Store
