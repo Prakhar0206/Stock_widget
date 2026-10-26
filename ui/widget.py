@@ -20,6 +20,8 @@ DEFAULT_LOOK = {"anchor": "top-right", "margin_x": 24, "margin_y": 24, "pos_x": 
                 "shadow_offset": 2, "background_mode": "transparent", "panel_color": "#202020",
                 "opacity": 0.92, "padding": 12}
 COLORS = {"up": GREEN, "down": RED, "neutral": GREY, "amber": AMBER, "dim": DIM}
+DIM_DOT_COLORS = {"green": "#1E5631", "amber": "#785116", "red": "#6E1D1D"}
+PULSE_DOT_COLORS = {"green": "#86EFAC", "amber": "#FCD34D", "red": "#FCA5A5"}
 FLASH_BG = "#4B5563"
 IDLE_EDIT_S = 60
 
@@ -173,8 +175,15 @@ class EditPanel(tk.Frame):
     def refresh(self):
         now = self.view.now_fn()
         hv = self.ctrl.header(now)
-        self.lbl_head.config(text=f"{hv.market} · {hv.ist} · {hv.ny} · feed: {hv.feed_text}"
-                                  + ("  · MUTED" if hv.muted else ""))
+        strip = self.ctrl.status_strip(now)
+        prob_txt = "  ".join(f"{p.glyph}{(' ' + p.badge) if p.badge else ''}" for p in strip.problems)
+        if strip.overflow_count > 0:
+            prob_txt += f" +{strip.overflow_count}"
+        self.lbl_head.config(
+            text=f"{strip.session_icon} {hv.market} · {hv.ist} · {hv.ny} · {strip.heartbeat_tooltip}"
+                 + (f" · {prob_txt}" if prob_txt else "")
+                 + ("  · MUTED" if hv.muted else "")
+        )
         self.lbl_warn.config(text="\n".join(self.ctrl.all_warnings()))
         self.btn_summary.config(text="Summary ●" if hv.summary_dot else "Summary")
         self.btn_mute.config(text="Unmute" if hv.muted else "Mute")
@@ -227,6 +236,7 @@ class WidgetView:
         self.f = tkfont.Font(root, family=lk["font"], size=lk["size"])
         self.fb = tkfont.Font(root, family=lk["font"], size=lk["size"], weight="bold")
         self.fs = tkfont.Font(root, family=lk["font"], size=max(8, lk["size"] - 2))
+        self.fbadge = tkfont.Font(root, family=lk["font"], size=max(7, lk["size"] - 3), weight="bold")
         self.canvas = tk.Canvas(root, bg=self.bg, highlightthickness=0, bd=0, width=10, height=10)
         self.canvas.pack()
         self.panel = None
@@ -234,6 +244,13 @@ class WidgetView:
         self._last_activity = time.monotonic()
         self._idle_job = None
         self._clock_job = None
+        self._pulse_job = None
+        self._pulsing = False
+        self._last_seen_heartbeat = None
+        self.tooltips: dict[str, str] = {}         # canvas tag -> tooltip text
+        self._active_tooltip_tag: str | None = None
+        self._tip_win: tk.Toplevel | None = None
+        self._tip_lbl: tk.Label | None = None
         root.bind_all("<Button>", self._touch, add="+")
         root.bind_all("<Key>", self._touch, add="+")
         root.bind_all("<Escape>", self._escape, add="+")
@@ -259,22 +276,111 @@ class WidgetView:
         else:
             self.render()
 
-    def _t(self, x, y, text, fill, font, anchor="nw", width=None):
+    def _t(self, x, y, text, fill, font, anchor="nw", width=None, tags=()):
         c, lk = self.canvas, self.look
         kw = {"width": width} if width else {}
+        if tags:
+            kw["tags"] = tags
         if lk["shadow_color"]:
             o = lk["shadow_offset"]
             c.create_text(x + o, y + o, text=text, fill=lk["shadow_color"], font=font, anchor=anchor, **kw)
         return c.create_text(x, y, text=text, fill=fill, font=font, anchor=anchor, **kw)
 
+    # ---- hover tooltips ----------------------------------------------------------------------------
+    def _bind_tooltip(self, tag: str, text: str) -> None:
+        if not text:
+            return
+        self.tooltips[tag] = text
+        self.canvas.tag_bind(tag, "<Enter>", lambda e, t=tag: self.show_tooltip(t, e))
+        self.canvas.tag_bind(tag, "<Leave>", lambda e, t=tag: self.hide_tooltip(t))
+
+    def show_tooltip(self, tag: str, event=None) -> str:
+        """Display a crisp single-line tooltip for `tag`. Returns the tooltip text."""
+        text = self.tooltips.get(tag, "")
+        if not text:
+            return ""
+        self._active_tooltip_tag = tag
+        try:
+            if self._tip_win is None or not self._tip_win.winfo_exists():
+                self._tip_win = tk.Toplevel(self.root, bg="#111827", bd=1, relief="solid")
+                self._tip_win.overrideredirect(True)
+                try:
+                    self._tip_win.attributes("-topmost", True)
+                except tk.TclError:
+                    pass
+                self._tip_lbl = tk.Label(
+                    self._tip_win, text=text, bg="#111827", fg="#F9FAFB",
+                    font=self.fs, padx=6, pady=2, justify="left"
+                )
+                self._tip_lbl.pack()
+            else:
+                self._tip_lbl.config(text=text)
+            if event is not None and hasattr(event, "x_root") and hasattr(event, "y_root"):
+                x = event.x_root + 10
+                y = event.y_root + 16
+            else:
+                bbox = self.canvas.bbox(tag) or (0, 0, 0, 0)
+                x = self.canvas.winfo_rootx() + bbox[0]
+                y = self.canvas.winfo_rooty() + bbox[3] + 4
+            self._tip_win.geometry(f"+{x}+{y}")
+            self._tip_win.deiconify()
+        except tk.TclError:
+            pass
+        return text
+
+    def hide_tooltip(self, tag: str | None = None) -> None:
+        if tag is not None and self._active_tooltip_tag not in (None, tag):
+            return
+        self._active_tooltip_tag = None
+        if self._tip_win is not None:
+            try:
+                self._tip_win.withdraw()
+            except tk.TclError:
+                pass
+
+    @property
+    def active_tooltip_text(self) -> str:
+        if self._active_tooltip_tag is None:
+            return ""
+        return self.tooltips.get(self._active_tooltip_tag, "")
+
+    def _trigger_heartbeat_pulse(self) -> None:
+        """Pulse the heartbeat dot softly on each new successful fetch."""
+        self._pulsing = True
+        if self._pulse_job is not None:
+            try:
+                self.root.after_cancel(self._pulse_job)
+            except tk.TclError:
+                pass
+
+        def end_pulse():
+            self._pulse_job = None
+            self._pulsing = False
+            if not self.editing:
+                self.render()
+
+        try:
+            self._pulse_job = self.root.after(450, end_pulse)
+        except tk.TclError:
+            self._pulsing = False
+
     def render(self) -> tuple:
-        """Draw the rows and fit the window to them. Returns (width, height)."""
+        """Draw the corner status strip and stock rows, then fit the window. Returns (width, height)."""
         if self.editing:
             return (0, 0)
         now = self.now_fn()
         c, lk, f, fb = self.canvas, self.look, self.f, self.fb
-        hv, rows, warns = self.ctrl.header(now), self.ctrl.row_views(now), self.ctrl.all_warnings()
+        strip = self.ctrl.status_strip(now)
+        hv = self.ctrl.header(now)
+        rows = self.ctrl.row_views(now)
+        warns = self.ctrl.all_warnings()
+
+        if strip.last_heartbeat_at is not None and strip.last_heartbeat_at != self._last_seen_heartbeat:
+            self._last_seen_heartbeat = strip.last_heartbeat_at
+            self._trigger_heartbeat_pulse()
+
         c.delete("all")
+        self.tooltips.clear()
         pad, gap = lk["padding"], 14
         lh = f.metrics("linespace") + 4
         flashing = self.flashing()
@@ -292,25 +398,68 @@ class WidgetView:
             x += w_ + gap
         table_w = max(x - gap, pad) - pad
         y = pad
-        # header: market, IST + NY time, feed dot, summary dot, mute
+
+        # ---- Corner Status Strip: [ ☀️ / 🌙 ] [ Heartbeat Dot ] [ Problem Icons Strip ] ------------
         hx = pad
-        mcol = {"OPEN": GREEN, "PRE": AMBER, "AFTER": AMBER, "CLOSED": GREY}.get(hv.market, GREY)
-        for s, col, font in ((hv.market, mcol, fb), (f"   {hv.ist}  ·  {hv.ny}", text, f)):
-            item = self._t(hx, y, s, col, font)
-            hx = c.bbox(item)[2]
-        r_ = lh // 4
-        dot = {"green": GREEN, "amber": AMBER, "red": RED}.get(hv.feed_dot, GREY)
         mid = y + lh // 2
-        c.create_oval(hx + 14, mid - r_, hx + 14 + 2 * r_, mid + r_, fill=dot, outline="")
-        item = self._t(hx + 14 + 2 * r_ + 6, y, hv.feed_text, dot, self.fs)
-        hx = c.bbox(item)[2]
+
+        # 1. Sun / Moon Icon
+        sun_moon_tag = "status_sun_moon"
+        sm_item = self._t(hx, y, strip.session_icon, text, fb, tags=(sun_moon_tag,))
+        self._bind_tooltip(sun_moon_tag, strip.session_tooltip)
+        hx = c.bbox(sm_item)[2] + 10
+
+        # 2. Heartbeat Dot
+        hb_tag = "status_heartbeat"
+        base_r = max(4, lh // 4)
+        r_ = base_r + (1 if self._pulsing else 0)
+        if strip.heartbeat_dim:
+            dot_col = DIM_DOT_COLORS.get(strip.heartbeat_color, DIM)
+        elif self._pulsing:
+            dot_col = PULSE_DOT_COLORS.get(strip.heartbeat_color, GREEN)
+        else:
+            dot_col = {"green": GREEN, "amber": AMBER, "red": RED}.get(strip.heartbeat_color, GREY)
+
+        c.create_oval(
+            hx, mid - r_, hx + 2 * r_, mid + r_,
+            fill=dot_col, outline="", tags=(hb_tag,)
+        )
+        self._bind_tooltip(hb_tag, strip.heartbeat_tooltip)
+        hx += 2 * r_ + 10
+
+        # 3. Problem Icons Strip (ordered Red first, then Amber, with key badges & +N overflow)
+        for idx, prob in enumerate(strip.problems):
+            ptag = f"status_problem_{idx}"
+            pcol = RED if prob.color == "red" else AMBER
+            g_item = self._t(hx, y, prob.glyph, pcol, self.fs, tags=(ptag,))
+            hx = c.bbox(g_item)[2]
+            if prob.badge:
+                b_item = self._t(hx + 2, y + 1, prob.badge, pcol, self.fbadge, tags=(ptag,))
+                hx = c.bbox(b_item)[2]
+            self._bind_tooltip(ptag, prob.tooltip)
+            hx += 10
+
+        if strip.overflow_count > 0:
+            otag = "status_problem_overflow"
+            o_item = self._t(hx, y + 1, f"+{strip.overflow_count}", AMBER, self.fbadge, tags=(otag,))
+            self._bind_tooltip(otag, strip.overflow_tooltip or f"{strip.overflow_count} more problem(s)")
+            hx = c.bbox(o_item)[2] + 10
+
         if hv.summary_dot:
-            c.create_oval(hx + 12, mid - r_, hx + 12 + 2 * r_, mid + r_, fill="#60A5FA", outline="")
-            hx += 12 + 2 * r_
+            stag = "status_summary"
+            c.create_oval(hx, mid - base_r, hx + 2 * base_r, mid + base_r, fill="#60A5FA", outline="", tags=(stag,))
+            self._bind_tooltip(stag, "New daily summary available")
+            hx += 2 * base_r + 8
+
         if hv.muted:
-            item = self._t(hx + 12, y, "MUTED", AMBER, self.fs)
-            hx = c.bbox(item)[2]
-        y += lh + 4
+            mtag = "status_muted"
+            m_item = self._t(hx, y, "🔇", AMBER, self.fs, tags=(mtag,))
+            self._bind_tooltip(mtag, "Alerts muted")
+            hx = c.bbox(m_item)[2] + 8
+
+        y += lh + 2
+
+        # ---- Stock rows ----------------------------------------------------------------------------
         for r in rows:
             if r.symbol in flashing:
                 c.create_rectangle(pad - 6, y - 2, pad + table_w + 6, y + lh - 2, fill=FLASH_BG, outline="")
@@ -337,14 +486,14 @@ class WidgetView:
         self.layer.fit(total_w, total_h)
         return total_w, total_h
 
-    # ---- clock tick: the header shows minutes ----------------------------------------------------
+    # ---- clock tick: refresh status & age tooltips -----------------------------------------------
     def start_clock(self):
         def tick():
             try:
                 self.refresh()
             finally:                               # one failed refresh must not stop the clock
                 now = time.time()
-                self._clock_job = self.root.after(int((60 - now % 60) * 1000) + 50, tick)
+                self._clock_job = self.root.after(int((15 - now % 15) * 1000) + 50, tick)
         tick()
 
     # ---- edit mode ---------------------------------------------------------------------------------
@@ -354,6 +503,7 @@ class WidgetView:
     def enter_edit(self):
         if self.editing:
             return
+        self.hide_tooltip()
         self.layer.set_interactive(True)
         self.canvas.pack_forget()
         self.root.configure(bg=BG)

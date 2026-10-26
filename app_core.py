@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Optional
@@ -15,6 +16,7 @@ from engine import AlertEngine, merge_events
 from market_clock import ET, IST, MarketCalendar, Session, utcnow
 from models import ARMED, DISABLED, DONE, AlertEvent, PriceTick, StockConfig, ValidationError, Watchlist
 from positions import q2
+from scheduler import CLOSED_POLL_S
 from store import Store
 from summary import build_card
 from watchlist import ensure_slipping_alert
@@ -46,6 +48,28 @@ class RowView:
 
 
 @dataclass
+class ProblemIconView:
+    kind: str           # key_invalid | rate_limited | offline | server_down | custom
+    glyph: str          # 🔑❌ | ⏳ | 🚫📶 | ☁️❌
+    color: str          # red | amber
+    badge: str          # e.g. "2" or "1, 3" or ""
+    tooltip: str        # crisp single-line hover tooltip
+
+
+@dataclass
+class StatusStripView:
+    session_icon: str                        # "☀️" when regular session open, else "🌙"
+    session_tooltip: str                     # e.g. "US market open" / "US market closed"
+    heartbeat_color: str                     # "green" | "amber" | "red"
+    heartbeat_dim: bool                      # True when market is closed
+    heartbeat_tooltip: str                   # e.g. "Live, updated 8s ago" / "Market closed, next update in 11 min"
+    last_heartbeat_at: Optional[datetime]    # updated on every successful fetch
+    problems: list[ProblemIconView] = field(default_factory=list)   # max 3 visible problem icons
+    overflow_count: int = 0                  # >0 when >3 problems active (renders "+N")
+    overflow_tooltip: str = ""
+
+
+@dataclass
 class HeaderView:
     market: str
     ist: str
@@ -54,6 +78,12 @@ class HeaderView:
     feed_text: str
     summary_dot: bool
     muted: bool
+    # Redesigned status strip fields attached for direct access
+    session_icon: str = "🌙"
+    heartbeat_dim: bool = False
+    heartbeat_tooltip: str = ""
+    problems: list[ProblemIconView] = field(default_factory=list)
+    overflow_count: int = 0
 
 
 class AppController:
@@ -79,6 +109,11 @@ class AppController:
         self.provider_status: Optional[dict] = None
         self.provider_status_at: Optional[datetime] = None
         self.notices: dict = {}
+        self.last_heartbeat_at: Optional[datetime] = None
+        self.last_poll_at: Optional[datetime] = None
+        self.server_down: bool = False
+        self.extra_problems: list[ProblemIconView] = []   # extensible for >3 simultaneous problem tests
+        self._notified_invalid_keys: set[int] = set()
 
     @staticmethod
     def _run_inline(fn, cb):
@@ -99,6 +134,8 @@ class AppController:
                 self.on_ticks(msg[1], msg[2])
             elif kind == "status":
                 self.provider_status, self.provider_status_at = msg[1], msg[2]
+            elif kind == "invalid_key":
+                self.on_invalid_key(msg[1], msg[2], msg[3])
             elif kind == "error":
                 self.on_error(msg[1], msg[2], msg[3])
             elif kind == "call":
@@ -106,6 +143,13 @@ class AppController:
                     msg[1](msg[2], msg[3])
                 except Exception:
                     log.exception("callback failed")
+        self._check_provider_invalid_keys(self.now_fn())
+
+    def _check_provider_invalid_keys(self, now: datetime) -> None:
+        pop_fn = getattr(self.provider, "pop_invalid_key_events", None)
+        if callable(pop_fn):
+            for key_num, code in pop_fn():
+                self.on_invalid_key(key_num, code, now)
 
     def session(self, now: datetime) -> Session:
         """Provider market status when it answered recently, else the bundled calendar."""
@@ -125,11 +169,15 @@ class AppController:
         return self.calendar.session_at(now)
 
     def on_ticks(self, ticks: list, now: datetime) -> None:
+        self._check_provider_invalid_keys(now)
         by = {t.symbol: t for t in ticks}
         session = self.session(now)
-        self.feed.record_success(now)
+        if ticks:
+            self.feed.record_success(now)
+            self.last_heartbeat_at = now
+            self.last_poll_at = now
+            self.feed_kind = "ok"
         self.feed.note_session(session == Session.REGULAR, now)
-        self.feed_kind = "ok"
         events = []
         for stock in list(self.wl.symbols):
             t = by.get(stock.symbol)
@@ -141,16 +189,45 @@ class AppController:
             events += self.engine.process_tick(stock, t, now, session)
             row.paused = self.engine.is_paused(stock.symbol)
             if session == Session.REGULAR and t.price > 0 and not row.paused:
-                # the summary uses the last regular-session reading, so later display polls
-                # (or a restart / wake before the card is built) cannot overwrite it
                 self.engine.state.setdefault("last_regular", {})[stock.symbol] = {
                     "price": str(t.price), "prev_close": str(t.prev_close) if t.prev_close else None,
                     "zone": self.engine.state["symbols"].get(stock.symbol, {}).get("zone"), "time": now.isoformat()}
         self.dispatch(events)
         self._save_state()
 
+    def on_invalid_key(self, key_num: int, code: int, now: datetime) -> None:
+        """Immediate one-time desktop notification when a key returns HTTP 401/403."""
+        if key_num in self._notified_invalid_keys:
+            return
+        self._notified_invalid_keys.add(key_num)
+        msg = f"Finnhub key #{key_num} is invalid (HTTP {code})"
+        self.notices[f"auth_{key_num}"] = msg
+        ev = AlertEvent(
+            symbol="KEY",
+            alert_id=f"key-invalid-{key_num}",
+            kind="key_invalid",
+            label="RISK",
+            priority="HIGH",
+            price=Decimal(0),
+            time=now,
+            source="finnhub",
+            condition=msg,
+            note=msg,
+        )
+        self.dispatch([ev])
+
     def on_error(self, kind: str, text: str, now: datetime) -> None:
-        self.feed_kind = {"network": "offline", "rate": "degraded", "malformed": "degraded"}.get(kind, kind)
+        self._check_provider_invalid_keys(now)
+        self.last_poll_at = now
+        if kind == "network":
+            self.feed_kind = "offline"
+        elif kind == "server" or "HTTP 5" in text:
+            self.feed_kind = "degraded"
+            self.server_down = True
+        elif kind in ("rate", "malformed"):
+            self.feed_kind = "degraded"
+        else:
+            self.feed_kind = kind
         if kind in ("auth", "budget"):
             self.notices[kind] = text
         log.warning("poll error: %s %s", kind, text)
@@ -170,14 +247,16 @@ class AppController:
             log.exception("notification failed")      # a broken backend never stops evaluation
 
     def housekeeping(self, now: datetime) -> None:
-        """Call every few seconds: stale-feed alert, summary at the close."""
+        """Call every few seconds: stale-feed alert (>3 min offline during market hours), summary at the close."""
+        self._check_provider_invalid_keys(now)
         session = self.session(now)
         self.feed.note_session(session == Session.REGULAR, now)
         if self.polling_enabled:
             r = self.feed.check(now)
             if r == "stale":
                 self.dispatch([AlertEvent("FEED", "feed-stale", "feed_stale", "RISK", "MEDIUM", Decimal(0), now,
-                                          "finnhub", condition="feed stale")])
+                                          "finnhub", condition="Feed offline: price data is stale",
+                                          note="Feed offline: price data is stale")])
         self._maybe_summary(now)
 
     def on_wake(self, now: datetime) -> None:
@@ -304,9 +383,200 @@ class AppController:
     def symbols(self) -> list:
         return [s.symbol for s in self.wl.symbols]
 
-    # ---- views ---------------------------------------------------------------------------------
+    # ---- status strip & views ------------------------------------------------------------------
+    @staticmethod
+    def _fmt_age(seconds: float) -> str:
+        s = max(0, int(round(seconds)))
+        if s < 60:
+            return f"{s}s"
+        m = max(1, int(round(s / 60)))
+        return f"{m} min"
+
+    def _build_problems(self, now: datetime) -> list[ProblemIconView]:
+        """Collect active problem icons, respecting offline exclusivity and severity ordering
+        (Red first, then Amber)."""
+        offline = (self.feed_kind == "offline") or bool(getattr(self.provider, "is_offline", False))
+        if offline:
+            # Spec 3.4 Offline exclusivity: When internet is down, show ONLY the No-WiFi icon.
+            if self.last_heartbeat_at is not None:
+                age_str = self._fmt_age((now - self.last_heartbeat_at).total_seconds())
+                tip = f"No internet, last update {age_str} ago"
+            else:
+                tip = "No internet, waiting for connection"
+            return [ProblemIconView(
+                kind="offline",
+                glyph="🚫📶",
+                color="amber",
+                badge="",
+                tooltip=tip,
+            )]
+
+        pool_fn = getattr(self.provider, "pool_status", None)
+        pool = pool_fn() if callable(pool_fn) else []
+
+        rejected_nums: list[int] = []
+        rate_limited_items: list[tuple[int, float]] = []
+        for idx, item in enumerate(pool):
+            num = item.get("num") or (idx + 1)
+            st = item.get("state")
+            wait = float(item.get("retry_in_s") or 0.0)
+            if st == "rejected":
+                rejected_nums.append(num)
+            elif st == "rate_limited":
+                rate_limited_items.append((num, wait))
+
+        if not rejected_nums and self.feed_kind in ("auth", "nokey"):
+            rejected_nums.append(1)
+
+        problems: list[ProblemIconView] = []
+
+        # 1. Red severity: Key invalid/expired (401/403) -> 🔑❌
+        if rejected_nums:
+            badge = ", ".join(str(n) for n in rejected_nums)
+            if len(rejected_nums) == 1:
+                tip = f"Key {rejected_nums[0]} invalid, check it in settings"
+            else:
+                tip = f"Keys {badge} invalid, check them in settings"
+            problems.append(ProblemIconView(
+                kind="key_invalid",
+                glyph="🔑❌",
+                color="red",
+                badge=badge,
+                tooltip=tip,
+            ))
+
+        # Additional red problems from extra_problems
+        for ep in self.extra_problems:
+            if ep.color == "red":
+                problems.append(ep)
+
+        # 2. Amber severity: Rate limited (HTTP 429) -> ⏳
+        if rate_limited_items:
+            nums = [n for n, _ in rate_limited_items]
+            waits = [w for _, w in rate_limited_items if w > 0]
+            badge = ", ".join(str(n) for n in nums)
+            wait_s = max(1, int(round(min(waits)))) if waits else 0
+            if len(nums) == 1:
+                if wait_s > 0:
+                    tip = f"Key {nums[0]} rate limited, retrying in ~{wait_s}s"
+                else:
+                    tip = f"Key {nums[0]} rate limited, retrying on next turn"
+            else:
+                if wait_s > 0:
+                    tip = f"Keys {badge} rate limited, retrying in ~{wait_s}s"
+                else:
+                    tip = f"Keys {badge} rate limited, retrying on next turn"
+            problems.append(ProblemIconView(
+                kind="rate_limited",
+                glyph="⏳",
+                color="amber",
+                badge=badge,
+                tooltip=tip,
+            ))
+
+        # 3. Amber severity: Finnhub server slow/down (5xx/timeout) -> ☁️❌
+        srv_down = self.server_down or bool(getattr(self.provider, "server_down", False))
+        if srv_down:
+            problems.append(ProblemIconView(
+                kind="server_down",
+                glyph="☁️❌",
+                color="amber",
+                badge="",
+                tooltip="Finnhub not responding, retrying",
+            ))
+
+        # Additional amber problems from extra_problems
+        for ep in self.extra_problems:
+            if ep.color != "red":
+                problems.append(ep)
+
+        return problems
+
+    def status_strip(self, now: datetime) -> StatusStripView:
+        sess = self.session(now)
+        regular = sess == Session.REGULAR
+        session_icon = "☀️" if regular else "🌙"
+        session_tooltip = "US market open (regular session)" if regular else f"US market closed ({sess.value})"
+
+        all_problems = self._build_problems(now)
+        visible_problems = all_problems[:3]
+        overflow_count = max(0, len(all_problems) - 3)
+        overflow_tooltip = ", ".join(p.tooltip for p in all_problems[3:]) if overflow_count > 0 else ""
+
+        # Heartbeat dot color:
+        # - Offline: turns amber initially, then red when stale (>= 3 min)
+        # - Complete outage (all keys failed / auth / budget / stale): red
+        # - Degraded (some stocks failing, rate-limited failover, server slow): amber
+        # - Healthy: green
+        stale = self.feed.stale
+        if self.last_heartbeat_at is not None and regular:
+            if (now - self.last_heartbeat_at).total_seconds() >= self.cfg.stale_after_seconds:
+                stale = True
+
+        healthy_fn = getattr(self.provider, "healthy_key_count", None)
+        key_count_fn = getattr(self.provider, "key_count", None)
+        total_keys = key_count_fn if isinstance(key_count_fn, int) else (key_count_fn() if callable(key_count_fn) else 1)
+        healthy_keys = healthy_fn() if callable(healthy_fn) else 1
+
+        if not self.polling_enabled or self.feed_kind in ("nokey", "budget"):
+            hb_color = "red"
+        elif self.feed_kind == "offline":
+            hb_color = "red" if stale else "amber"
+        elif stale:
+            hb_color = "red"
+        elif self.feed_kind == "auth" or (total_keys > 0 and healthy_keys == 0):
+            hb_color = "red"
+        elif self.feed_kind == "degraded" or self.server_down:
+            hb_color = "amber"
+        else:
+            hb_color = "green"
+
+        hb_dim = not regular
+
+        # Heartbeat tooltip
+        if not regular:
+            ref = self.last_poll_at or self.last_heartbeat_at
+            if ref is not None:
+                elapsed = max(0.0, (now - ref).total_seconds())
+                rem_min = max(1, int(math.ceil(max(0.0, CLOSED_POLL_S - elapsed) / 60.0)))
+            else:
+                rem_min = 15
+            hb_tooltip = f"Market closed, next update in {rem_min} min"
+        else:
+            if hb_color == "red":
+                if self.last_heartbeat_at is not None:
+                    age_s = self._fmt_age((now - self.last_heartbeat_at).total_seconds())
+                    hb_tooltip = f"Outage, last update {age_s} ago"
+                else:
+                    hb_tooltip = "Outage, no data received"
+            elif hb_color == "amber":
+                if self.last_heartbeat_at is not None:
+                    age_s = self._fmt_age((now - self.last_heartbeat_at).total_seconds())
+                    hb_tooltip = f"Degraded, updated {age_s} ago"
+                else:
+                    hb_tooltip = "Feed degraded, retrying"
+            else:
+                if self.last_heartbeat_at is not None:
+                    age_s = max(0, int((now - self.last_heartbeat_at).total_seconds()))
+                    hb_tooltip = f"Live, updated {age_s}s ago"
+                else:
+                    hb_tooltip = "Live, waiting for first update"
+
+        return StatusStripView(
+            session_icon=session_icon,
+            session_tooltip=session_tooltip,
+            heartbeat_color=hb_color,
+            heartbeat_dim=hb_dim,
+            heartbeat_tooltip=hb_tooltip,
+            last_heartbeat_at=self.last_heartbeat_at,
+            problems=visible_problems,
+            overflow_count=overflow_count,
+            overflow_tooltip=overflow_tooltip,
+        )
+
     def header(self, now: datetime) -> HeaderView:
         sess = self.session(now)
+        strip = self.status_strip(now)
         stale = self.feed.stale
         if self.feed_kind in ("offline",):
             dot, text = "red", "offline, retrying"
@@ -318,14 +588,25 @@ class AppController:
             dot, text = "red", {"nokey": "no API key", "auth": "key rejected", "budget": "poll budget"}[self.feed_kind]
         else:
             dot, text = "green", "live"
-        return HeaderView(sess.value, now.astimezone(IST).strftime("%H:%M IST"), now.astimezone(ET).strftime("%H:%M ET"),
-                          dot, text, self.summary_unseen, self.notifier.muted)
+        return HeaderView(
+            market=sess.value,
+            ist=now.astimezone(IST).strftime("%H:%M IST"),
+            ny=now.astimezone(ET).strftime("%H:%M ET"),
+            feed_dot=dot,
+            feed_text=text,
+            summary_dot=self.summary_unseen,
+            muted=self.notifier.muted,
+            session_icon=strip.session_icon,
+            heartbeat_dim=strip.heartbeat_dim,
+            heartbeat_tooltip=strip.heartbeat_tooltip,
+            problems=strip.problems,
+            overflow_count=strip.overflow_count,
+        )
 
     def all_warnings(self) -> list:
         w = list(self.warnings)
         if not self.polling_enabled:
             w.append("FINNHUB_API_KEY is not set, so prices are not polled. Set it and restart.")
-        w += list(self.notices.values())
         return w
 
     def zone_tag(self, symbol: str) -> str:
@@ -354,6 +635,7 @@ class AppController:
             age = int((now - row.last_ok).total_seconds()) if row.last_ok else None
             regular = sess == Session.REGULAR
             warn = ""
+            # Rows turn amber when feed offline/degraded, stale_after_seconds (3 min), or price jump paused
             stale = (self.feed_kind in ("offline", "degraded") or self.feed.stale or row.paused or
                      (regular and age is not None and age >= self.cfg.stale_after_seconds))
             if row.paused:

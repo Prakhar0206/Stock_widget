@@ -71,7 +71,7 @@ def texts(canvas):
 def test_normal_view_draws_header_rows_and_fits(app):
     root, ctrl, view, layer, st, quits = app
     t = texts(view.canvas)
-    assert "OPEN" in t and any("20:30 IST" in x for x in t) and "live" in t
+    assert any(icon in t for icon in ("☀️", "🌙"))
     assert "AAPL" in t and "TTWO" in t and "207.50" in t and "Sell zone" in t
     assert layer.fits and layer.fits[-1][0] > 300 and layer.fits[-1][1] > 60
 

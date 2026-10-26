@@ -17,6 +17,7 @@ from positions import FeeRates
 
 IST = ZoneInfo("Asia/Kolkata")
 MAX_CALLS_PER_MIN = 48          # 80% of the 60/min free-tier limit, PER API KEY
+SLOT_POLL_S = 15                # 15-second slot cadence during regular market hours with 4-key rotation
 ZONE_DEFAULTS_PCT = {"deep_loss": -10, "loss": -3, "sell": 3, "high_sell": 4.5,
                      "deep_drop": -10, "near_entry": 1, "far_above": 5}
 _KEY_SPLIT = re.compile(r"[,;\s]+")           # keys never contain commas, semicolons or whitespace
@@ -180,8 +181,11 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
     if prio not in PRIORITIES:
         raise ValueError("default_priority must be LOW, MEDIUM or HIGH")
     api_keys = _parse_api_keys(d.get("api_keys"))
+    num_keys = num_env_keys if num_env_keys > 0 else len(api_keys)
+    default_poll = 15 if num_keys >= 4 else 60
     cfg = Config(
-        poll_seconds=_int(d, "poll_seconds", 60), stale_after_seconds=_int(d, "stale_after_seconds", 180),
+        poll_seconds=_int(d, "poll_seconds", default_poll),
+        stale_after_seconds=_int(d, "stale_after_seconds", 180),
         max_symbols=_int(d, "max_symbols", 30), rates=rates,
         zone_band_standard=_dec(zb.get("standard", "0.5")), zone_band_noisy=_dec(zb.get("noisy", "1.0")),
         level_rearm_band_pct=_dec(d.get("level_rearm_band_pct", "0.5")), level_alert_mode=mode,
@@ -191,7 +195,6 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
         quiet_hours_ist=_parse_quiet(d.get("quiet_hours_ist")),
         hotkeys_enabled=_bool(d, "hotkeys_enabled", True), extended_hours=_bool(d, "extended_hours", False),
         zone_defaults=zd, look=dict(_obj(d, "look")), api_keys=api_keys)
-    num_keys = num_env_keys if num_env_keys > 0 else len(api_keys)
     check_budget(cfg.max_symbols, cfg.poll_seconds, num_keys=num_keys)
     return cfg
 
@@ -200,13 +203,14 @@ def load_config(path: Path, num_env_keys: int = 0):
     """Returns (Config, warnings). Missing file -> defaults, no warning. Invalid -> defaults + warning.
     num_env_keys is passed through to parse_config (keys that come from the environment)."""
     path = Path(path)
+    default_poll = 15 if num_env_keys >= 4 else 60
     if not path.exists():
-        return Config(), []
+        return Config(poll_seconds=default_poll), []
     try:
         data = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal)
         return parse_config(data, num_env_keys=num_env_keys), []
     except Exception as exc:  # any problem: built-in defaults, shown on the widget
-        return Config(), [f"config.json is invalid ({exc}); using built-in defaults."]
+        return Config(poll_seconds=default_poll), [f"config.json is invalid ({exc}); using built-in defaults."]
 
 
 def in_quiet_hours(cfg: Config, now_utc: datetime) -> bool:
