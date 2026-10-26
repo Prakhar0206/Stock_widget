@@ -183,8 +183,13 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
     api_keys = _parse_api_keys(d.get("api_keys"))
     num_keys = num_env_keys if num_env_keys > 0 else len(api_keys)
     default_poll = 15 if num_keys >= 4 else 60
+    raw_poll = d.get("poll_seconds")
+    if raw_poll is None or (raw_poll == 60 and num_keys >= 4):
+        poll_s = default_poll
+    else:
+        poll_s = _int(d, "poll_seconds", default_poll)
     cfg = Config(
-        poll_seconds=_int(d, "poll_seconds", default_poll),
+        poll_seconds=poll_s,
         stale_after_seconds=_int(d, "stale_after_seconds", 180),
         max_symbols=_int(d, "max_symbols", 30), rates=rates,
         zone_band_standard=_dec(zb.get("standard", "0.5")), zone_band_noisy=_dec(zb.get("noisy", "1.0")),

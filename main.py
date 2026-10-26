@@ -120,6 +120,8 @@ def build_runtime(args, environ=os.environ) -> Runtime:
     if keys:
         from store import register_keys_for_redaction
         register_keys_for_redaction(keys)
+        if len(keys) >= 4 and cfg.poll_seconds == 60:
+            cfg = replace(cfg, poll_seconds=15)
         cfg, warnings = enforce_budget(cfg, folder, len(keys), warnings)
     provider = FinnhubProvider(keys) if keys else MockProvider({})
     return Runtime(cfg, folder, provider, bool(keys), None, warnings, "Local\\StockAlertWidget_SingleInstance", False,
