@@ -176,6 +176,28 @@ def test_mini_tracker_filtering_and_rows(tk_app):
         win.destroy()
 
 
+def test_mini_tracker_allows_more_than_five_stocks(tk_app):
+    root, ctrl, view, layer, st = tk_app
+    state = {"category_filter": "ALL", "selected_symbols": []}
+    rows_data = [
+        {"symbol": f"SYM{i}", "price": 100.0 + i, "change_pct": 1.0, "category": "WATCH", "alert": None}
+        for i in range(10)
+    ]
+    win = MiniTrackerWindow(
+        root,
+        get_state=lambda: state,
+        set_state=lambda patch: state.update(patch),
+        get_rows=lambda: rows_data,
+        get_alerts=lambda: (0, "warn"),
+        acknowledge=lambda: True,
+    )
+    try:
+        filtered = win._filtered_rows()
+        assert len(filtered) == 10  # No 5-stock limit!
+    finally:
+        win.destroy()
+
+
 def test_mini_tracker_alert_pill_acknowledge(tk_app):
     root, ctrl, view, layer, st = tk_app
     state = {}

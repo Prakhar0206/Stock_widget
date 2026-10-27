@@ -525,16 +525,33 @@ class WidgetView:
             self._bind_tooltip(mtag, "Alerts muted")
             hx = c.bbox(m_item)[2] + 8
 
-        # 5. Mini Tracker Button
+        # 5. Mini Tracker Graphical Toggle Switch (Capsule Pill + Knob)
         mini_open = self.mini is not None and self.mini.winfo_exists()
         mini_tag = "status_mini_tracker"
-        mini_col = "#60A5FA" if mini_open else GREY
-        mini_item = self._t(hx, y, "◱ Mini", mini_col, self.fs, tags=(mini_tag,))
-        self._bind_tooltip(mini_tag, "Hide floating Mini Tracker" if mini_open else "Show floating Mini Tracker")
+        sw_w, sw_h = 28, 14
+        r = sw_h // 2
+        kr = r - 2
+        sx = hx + 4
+        track_col = "#10B981" if mini_open else "#374151"
+        knob_col = "#FFFFFF" if mini_open else "#9CA3AF"
+        knob_cx = (sx + sw_w - r) if mini_open else (sx + r)
+
+        # Capsule track with rounded ends
+        c.create_line(sx + r, mid, sx + sw_w - r, mid, width=sw_h, capstyle="round",
+                      fill=track_col, tags=(mini_tag,))
+        # Circular thumb knob
+        c.create_oval(knob_cx - kr, mid - kr, knob_cx + kr, mid + kr,
+                      fill=knob_col, outline="", tags=(mini_tag,))
+
+        # Text label next to the toggle
+        lbl_col = "#34D399" if mini_open else GREY
+        lbl_item = self._t(sx + sw_w + 6, y, "Mini", lbl_col, self.fs, tags=(mini_tag,))
+        self._bind_tooltip(mini_tag, "Mini Tracker: ON (Click to turn off)" if mini_open
+                                      else "Mini Tracker: OFF (Click to turn on)")
         c.tag_bind(mini_tag, "<Button-1>", lambda e: self.toggle_mini())
         c.tag_bind(mini_tag, "<Enter>", lambda e: c.config(cursor="hand2"), add="+")
         c.tag_bind(mini_tag, "<Leave>", lambda e: c.config(cursor=""), add="+")
-        hx = c.bbox(mini_item)[2] + 8
+        hx = c.bbox(lbl_item)[2] + 10
 
         y += lh + 2
 

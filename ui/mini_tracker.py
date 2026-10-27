@@ -100,7 +100,11 @@ class MiniTrackerWindow(tk.Toplevel):
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(highlightthickness=1, highlightbackground="#2A2A2A")
+        try:
+            self.attributes("-alpha", 0.88)
+        except tk.TclError:
+            pass
+        self.configure(highlightthickness=1, highlightbackground="#38BDF8")
 
         self._build_header()
         self.rows_frame = tk.Frame(self, bg=BG)
@@ -127,7 +131,7 @@ class MiniTrackerWindow(tk.Toplevel):
         self.header.pack(fill="x")
         self.header.pack_propagate(False)
 
-        self.pin_btn = tk.Label(self.header, text="📌", font=FONT_ICON, bg=HDR_BG,
+        self.pin_btn = tk.Label(self.header, text="📍", font=FONT_ICON, bg=HDR_BG,
                                 fg=MUTED, cursor="hand2", padx=8)
         self.pin_btn.pack(side="left")
         self.pin_btn.bind("<Button-1>", lambda e: self.set_pinned(not self._pinned))
@@ -226,7 +230,7 @@ class MiniTrackerWindow(tk.Toplevel):
             rows = [r for r in rows if r["symbol"] in sel]
         if cat != "ALL":
             rows = [r for r in rows if (r.get("category") or "").upper() == cat]
-        return rows[:5]
+        return rows
 
     def refresh(self):
         """Call on every quote update (15s cadence)."""
@@ -329,14 +333,16 @@ class MiniTrackerWindow(tk.Toplevel):
 
 # --------------------------------------------------------- Settings dialog
 class MiniTrackerSettingsDialog(tk.Toplevel):
-    MAX_SELECTED = 5
-
     def __init__(self, parent, state, get_rows, on_apply):
         super().__init__(parent, bg="#1A1A1A")
         self._on_apply = on_apply
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(highlightthickness=1, highlightbackground="#333333")
+        try:
+            self.attributes("-alpha", 0.92)
+        except tk.TclError:
+            pass
+        self.configure(highlightthickness=1, highlightbackground="#38BDF8")
 
         self.cat = tk.StringVar(value=state.get("category_filter", "ALL"))
         sel = set(state.get("selected_symbols") or [])
@@ -356,17 +362,29 @@ class MiniTrackerSettingsDialog(tk.Toplevel):
             self._pill_btns[c] = b
         self._set_cat(self.cat.get(), apply=False)
 
-        tk.Label(self, text=f"Pick 2–{self.MAX_SELECTED} stocks", font=("Segoe UI", 8),
+        tk.Label(self, text="Select stocks to track", font=("Segoe UI", 8),
                  bg="#1A1A1A", fg=MUTED).pack(anchor="w", padx=12, pady=(8, 0))
 
         self.vars = {}
-        box = tk.Frame(self, bg="#1A1A1A")
-        box.pack(fill="x", padx=10, pady=4)
+        box_wrap = tk.Frame(self, bg="#1A1A1A")
+        box_wrap.pack(fill="both", expand=True, padx=10, pady=4)
+        if len(rows) > 7:
+            canvas = tk.Canvas(box_wrap, bg="#1A1A1A", highlightthickness=0, height=180, width=220)
+            sb = tk.Scrollbar(box_wrap, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=sb.set)
+            box = tk.Frame(canvas, bg="#1A1A1A")
+            canvas.create_window((0, 0), window=box, anchor="nw")
+            canvas.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            box.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        else:
+            box = box_wrap
+
         for r in rows:
             v = tk.BooleanVar(value=r["symbol"] in sel)
             self.vars[r["symbol"]] = v
             tk.Checkbutton(box, text=f"{r['symbol']}  ({r.get('category') or '-'})",
-                           variable=v, command=lambda s=r["symbol"]: self._toggle(s),
+                           variable=v, command=self._push,
                            bg="#1A1A1A", fg="#E5E7EB", selectcolor="#2A2A2A",
                            activebackground="#1A1A1A", activeforeground="#FFFFFF",
                            font=("Segoe UI", 9), anchor="w").pack(fill="x")
@@ -401,9 +419,6 @@ class MiniTrackerSettingsDialog(tk.Toplevel):
             self._push()
 
     def _toggle(self, sym):
-        chosen = [s for s, v in self.vars.items() if v.get()]
-        if len(chosen) > self.MAX_SELECTED:
-            self.vars[sym].set(False)  # enforce cap
         self._push()
 
     def _clear(self):

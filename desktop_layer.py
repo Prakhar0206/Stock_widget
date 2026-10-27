@@ -725,20 +725,26 @@ def _get_window_rect(hwnd):
     return r
 
 
+SWP_REFRESH = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+
+
 def setup_selective_clickthrough(hwnd, header_height, poll_ms=30, tk_root=None):
     """Make everything below `header_height` px (int or callable -> int) click-through.
 
     Two cooperating mechanisms:
       1. WM_NCHITTEST subclass returning HTTRANSPARENT below the header.
       2. A cursor poller (needs `tk_root` for .after) that toggles
-         WS_EX_TRANSPARENT on the window depending on whether the cursor is
-         over the header. This makes click-through work across other applications.
+         WS_EX_TRANSPARENT with SWP_FRAMECHANGED on the window depending on
+         whether the cursor is over the header. This makes click-through
+         work across other applications.
     Call teardown_selective_clickthrough(hwnd) to undo.
     """
     if hwnd in _active_selective:
         return
     hh = header_height if callable(header_height) else (lambda: header_height)
-    st = {"hh": hh, "old": None, "proc": None, "job": None, "root": tk_root}
+    chwnd = getattr(tk_root, "winfo_id", lambda: None)() if tk_root else None
+    targets = [h for h in (hwnd, chwnd) if h]
+    st = {"hh": hh, "old": None, "proc": None, "job": None, "root": tk_root, "targets": targets}
 
     def _wndproc(h, msg, wparam, lparam):
         if msg == WM_NCHITTEST:
@@ -753,8 +759,11 @@ def setup_selective_clickthrough(hwnd, header_height, poll_ms=30, tk_root=None):
         return CallWindowProcW(st["old"], h, msg, wparam, lparam)
 
     st["proc"] = WNDPROC(_wndproc)
-    ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
-    SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+    for h in targets:
+        ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
+        SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+        if SetWindowPos:
+            SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
     st["old"] = SetWindowLongPtrW(
         hwnd, GWLP_WNDPROC, ctypes.cast(st["proc"], ctypes.c_void_p))
     _active_selective[hwnd] = st
@@ -770,10 +779,13 @@ def setup_selective_clickthrough(hwnd, header_height, poll_ms=30, tk_root=None):
                 r = _get_window_rect(hwnd)
                 in_hdr = (r.left <= pt.x < r.right and
                           r.top <= pt.y < r.top + hh())
-                ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
-                want = ex & ~WS_EX_TRANSPARENT if in_hdr else ex | WS_EX_TRANSPARENT
-                if want != ex:
-                    SetWindowLongW(hwnd, GWL_EXSTYLE, want)
+                for h in targets:
+                    ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
+                    want = ex & ~WS_EX_TRANSPARENT if in_hdr else ex | WS_EX_TRANSPARENT
+                    if want != ex:
+                        SetWindowLongW(h, GWL_EXSTYLE, want)
+                        if SetWindowPos:
+                            SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
             except Exception:
                 pass
             finally:
@@ -803,10 +815,14 @@ def teardown_selective_clickthrough(hwnd):
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, st["old"])
         except Exception:
             pass
-    try:
-        ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
-        SetWindowLongW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
-    except Exception:
-        pass
+    targets = st.get("targets", [hwnd])
+    for h in targets:
+        try:
+            ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
+            SetWindowLongW(h, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
+            if SetWindowPos:
+                SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
+        except Exception:
+            pass
 
 
