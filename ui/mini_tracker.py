@@ -168,9 +168,22 @@ class MiniTrackerWindow(tk.Toplevel):
             self._save(pos_x=self.winfo_x(), pos_y=self.winfo_y())
 
     # -- positioning
+    def _get_hwnd(self):
+        if sys.platform == "win32":
+            try:
+                if hasattr(desktop_layer, "GetParent"):
+                    return desktop_layer.GetParent(self.winfo_id()) or self.winfo_id()
+                u = getattr(ctypes, "windll", None)
+                if u and hasattr(u, "user32"):
+                    return u.user32.GetParent(self.winfo_id()) or self.winfo_id()
+            except Exception:
+                pass
+        return self.winfo_id()
+
     def _place_initial(self, st):
         self.update_idletasks()
-        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        w = WIDTH
+        h = HEADER_H + max(1, len(self._visible)) * ROW_H + 6
         x, y = st.get("pos_x"), st.get("pos_y")
         if x is None or y is None:
             l, t, r, b = _primary_work_area()
@@ -193,16 +206,7 @@ class MiniTrackerWindow(tk.Toplevel):
         self.pin_btn.config(fg=ACCENT if pinned else MUTED,
                             text="📌" if pinned else "📍")
         self.update_idletasks()
-        hwnd = None
-        if sys.platform == "win32":
-            try:
-                u = getattr(ctypes, "windll", None)
-                if u and hasattr(u, "user32"):
-                    hwnd = u.user32.GetParent(self.winfo_id()) or self.winfo_id()
-            except Exception:
-                hwnd = self.winfo_id()
-        else:
-            hwnd = self.winfo_id()
+        hwnd = self._get_hwnd()
         if pinned:
             if hasattr(desktop_layer, "setup_selective_clickthrough") and hwnd:
                 desktop_layer.setup_selective_clickthrough(
@@ -230,6 +234,9 @@ class MiniTrackerWindow(tk.Toplevel):
         for w in self.rows_frame.winfo_children():
             w.destroy()
         self._badges = []
+        if not self._visible:
+            tk.Label(self.rows_frame, text="No stocks matching filter", font=("Segoe UI", 8),
+                     bg=BG, fg=MUTED, height=2).pack(fill="both", expand=True)
         for r in self._visible:
             arrow, color, pct = _fmt_row(r.get("price"), r.get("change_pct"))
             row = tk.Frame(self.rows_frame, bg=BG, height=ROW_H)
@@ -259,7 +266,7 @@ class MiniTrackerWindow(tk.Toplevel):
             icon = "🚨" if level == "critical" else "🔔"
             label = f"{icon} {count} Alert{'s' if count != 1 else ''}"
             self.center.config(text=f" {label} ", bg=col, fg="#111111", cursor="hand2",
-                               padx=8, pady=1)
+                                padx=8, pady=1)
             self._alerting = True
         else:
             self.center.config(text="Mini Tracker", bg=HDR_BG, fg=MUTED, cursor="",
@@ -296,22 +303,28 @@ class MiniTrackerWindow(tk.Toplevel):
 
     def hide(self):
         self._save(enabled=False)
-        if sys.platform == "win32":
-            try:
-                u = getattr(ctypes, "windll", None)
-                hwnd = u.user32.GetParent(self.winfo_id()) or self.winfo_id() if u and hasattr(u, "user32") else self.winfo_id()
-                if hasattr(desktop_layer, "teardown_selective_clickthrough"):
-                    desktop_layer.teardown_selective_clickthrough(hwnd)
-            except Exception:
-                pass
+        self.destroy()
+
+    def destroy(self):
         if self._flash_job:
             try:
                 self.after_cancel(self._flash_job)
             except Exception:
                 pass
+            self._flash_job = None
+        hwnd = self._get_hwnd()
+        if hasattr(desktop_layer, "teardown_selective_clickthrough") and hwnd:
+            try:
+                desktop_layer.teardown_selective_clickthrough(hwnd)
+            except Exception:
+                pass
         if self._settings and self._settings.winfo_exists():
-            self._settings.destroy()
-        self.destroy()
+            try:
+                self._settings.destroy()
+            except Exception:
+                pass
+            self._settings = None
+        super().destroy()
 
 
 # --------------------------------------------------------- Settings dialog
@@ -365,6 +378,8 @@ class MiniTrackerSettingsDialog(tk.Toplevel):
                          fg="#E5E7EB", padx=12, pady=3, cursor="hand2")
             b.pack(side="right", padx=3)
             b.bind("<Button-1>", lambda e, c=cmd: c())
+            b.bind("<Enter>", lambda e, w=b: w.config(bg="#3A3A3A"))
+            b.bind("<Leave>", lambda e, w=b: w.config(bg="#2A2A2A"))
 
         self.update_idletasks()
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()

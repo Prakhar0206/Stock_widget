@@ -778,7 +778,13 @@ def setup_selective_clickthrough(hwnd, header_height, poll_ms=30, tk_root=None):
                 pass
             finally:
                 if hwnd in _active_selective:
-                    st["job"] = tk_root.after(poll_ms, _poll)
+                    try:
+                        if tk_root.winfo_exists():
+                            st["job"] = tk_root.after(poll_ms, _poll)
+                        else:
+                            _active_selective.pop(hwnd, None)
+                    except Exception:
+                        _active_selective.pop(hwnd, None)
 
         _poll()
 
@@ -793,7 +799,14 @@ def teardown_selective_clickthrough(hwnd):
         except Exception:
             pass
     if st.get("old"):
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, st["old"])
-    ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
-    SetWindowLongW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
+        try:
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, st["old"])
+        except Exception:
+            pass
+    try:
+        ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
+        SetWindowLongW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
+    except Exception:
+        pass
+
 
