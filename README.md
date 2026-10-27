@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-249%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-260%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -13,6 +13,13 @@ An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert en
 ---
 
 ## Highlights & Features
+
+### 🪟 Floating Mini Tracker HUD (Always-on-Top)
+* **Compact Floating Companion**: A sleek, bottom-right floating widget showing real-time quotes (`Symbol`, `Price`, `Arrow`, `Change %`) without taking desktop space.
+* **Selective Click-Through Pinning**: When pinned (📌), the stock rows become click-through so you can interact with apps behind them, while the header stays interactive for unpinning, settings, and controls.
+* **Dynamic Alert Pill**: The center header turns into an animated alert pill (`[ 🔔 1 Alert ]` / `[ 🚨 1 Alert ]`) that lets you acknowledge active alerts and silence chimes with a single click.
+* **Category & Ticker Filters**: Filter on the fly with quick category buttons (`[All]`, `[SELL]`, `[HOLD]`, `[BUY]`, `[WATCH]`) and ticker checkboxes (limit 2–5).
+* **Instant Toggle**: Toggle the mini tracker via the `[◱ Mini]` tag button on the main wallpaper status bar or from the Edit Mode header.
 
 ### 🚀 High-Frequency Finnhub Key Pool (15s Updates)
 * **4-Key Round-Robin Rotation**: Distributes quote fetches across up to 4 Finnhub free-tier keys, unlocking **15-second live updates** during regular market hours ($4 \times 48 = 192$ calls/min budget, safely within the 30-symbol allowance).
@@ -178,6 +185,7 @@ stock_alert_widget/
 │   └── mock.py              # Demo/mock provider with scripted price trajectories
 └── ui/
     ├── widget.py            # Canvas HUD view, sonar pulse animation, tooltips
+    ├── mini_tracker.py      # Floating always-on-top HUD with selective click-through
     ├── editor.py            # Edit mode GUI, stock list, inline row expansion
     ├── dialogs.py           # Add stock & custom alert creation dialogs
     ├── popup.py             # Top-level desktop alert card

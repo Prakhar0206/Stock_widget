@@ -57,6 +57,8 @@ SystemParametersInfoW = _proto(user32.SystemParametersInfoW, wintypes.BOOL,
                                wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT)
 SetLayeredWindowAttributes = _proto(user32.SetLayeredWindowAttributes, wintypes.BOOL,
                                     HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD)
+GetWindowRect = _proto(user32.GetWindowRect, wintypes.BOOL, HWND, ctypes.POINTER(wintypes.RECT))
+GetCursorPos = _proto(user32.GetCursorPos, wintypes.BOOL, ctypes.POINTER(wintypes.POINT))
 # Multi-monitor APIs. HMONITOR is a pointer-sized handle: declare it as c_void_p so it is never
 # truncated to 32 bits on 64-bit Python (the ctypes default return type is c_int).
 HMONITOR = ctypes.c_void_p
@@ -111,7 +113,7 @@ WM_CLOSE, WM_MOUSEACTIVATE, WM_WINDOWPOSCHANGING = 0x0010, 0x0021, 0x0046
 WM_SETTINGCHANGE, WM_DISPLAYCHANGE, WM_NCHITTEST = 0x001A, 0x007E, 0x0084
 WM_SYSCOMMAND, WM_QUIT = 0x0112, 0x0012
 WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x100, 0x101, 0x104, 0x105
-MA_NOACTIVATE, HTCLIENT = 3, 1
+MA_NOACTIVATE, HTCLIENT, HTTRANSPARENT = 3, 1, -1
 SC_SIZE, SC_MOVE, SC_MINIMIZE, SC_MAXIMIZE = 0xF000, 0xF010, 0xF020, 0xF030
 SC_CLOSE, SC_RESTORE = 0xF060, 0xF120
 BLOCKED_SYSCOMMANDS = {SC_SIZE, SC_MOVE, SC_MINIMIZE, SC_MAXIMIZE, SC_CLOSE, SC_RESTORE}
@@ -709,3 +711,89 @@ class DesktopLayer:
                 self.reposition_pending = False
                 self._reposition()
             self.enforce_zorder()
+
+
+# ----------------------------------------------------------------------------
+# Selective click-through for floating companion windows (Mini Tracker)
+# ----------------------------------------------------------------------------
+_active_selective = {}
+
+
+def _get_window_rect(hwnd):
+    r = wintypes.RECT()
+    GetWindowRect(hwnd, ctypes.byref(r))
+    return r
+
+
+def setup_selective_clickthrough(hwnd, header_height, poll_ms=30, tk_root=None):
+    """Make everything below `header_height` px (int or callable -> int) click-through.
+
+    Two cooperating mechanisms:
+      1. WM_NCHITTEST subclass returning HTTRANSPARENT below the header.
+      2. A cursor poller (needs `tk_root` for .after) that toggles
+         WS_EX_TRANSPARENT on the window depending on whether the cursor is
+         over the header. This makes click-through work across other applications.
+    Call teardown_selective_clickthrough(hwnd) to undo.
+    """
+    if hwnd in _active_selective:
+        return
+    hh = header_height if callable(header_height) else (lambda: header_height)
+    st = {"hh": hh, "old": None, "proc": None, "job": None, "root": tk_root}
+
+    def _wndproc(h, msg, wparam, lparam):
+        if msg == WM_NCHITTEST:
+            x = ctypes.c_short(lparam & 0xFFFF).value
+            y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+            r = _get_window_rect(h)
+            if not (r.left <= x < r.right and r.top <= y < r.bottom):
+                return HTTRANSPARENT
+            if (y - r.top) >= hh():
+                return HTTRANSPARENT
+            return HTCLIENT
+        return CallWindowProcW(st["old"], h, msg, wparam, lparam)
+
+    st["proc"] = WNDPROC(_wndproc)
+    ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
+    SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+    st["old"] = SetWindowLongPtrW(
+        hwnd, GWLP_WNDPROC, ctypes.cast(st["proc"], ctypes.c_void_p))
+    _active_selective[hwnd] = st
+
+    if tk_root is not None:
+        pt = wintypes.POINT()
+
+        def _poll():
+            if hwnd not in _active_selective:
+                return
+            try:
+                GetCursorPos(ctypes.byref(pt))
+                r = _get_window_rect(hwnd)
+                in_hdr = (r.left <= pt.x < r.right and
+                          r.top <= pt.y < r.top + hh())
+                ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
+                want = ex & ~WS_EX_TRANSPARENT if in_hdr else ex | WS_EX_TRANSPARENT
+                if want != ex:
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, want)
+            except Exception:
+                pass
+            finally:
+                if hwnd in _active_selective:
+                    st["job"] = tk_root.after(poll_ms, _poll)
+
+        _poll()
+
+
+def teardown_selective_clickthrough(hwnd):
+    st = _active_selective.pop(hwnd, None)
+    if not st:
+        return
+    if st.get("job") and st.get("root") is not None:
+        try:
+            st["root"].after_cancel(st["job"])
+        except Exception:
+            pass
+    if st.get("old"):
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, st["old"])
+    ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
+    SetWindowLongW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
+

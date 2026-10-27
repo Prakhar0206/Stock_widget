@@ -10,6 +10,7 @@ from typing import Callable
 from ui.common import (AMBER, BG, BG2, DIM, FG, GREEN, GREY, MUTED, RED,
                        TRANSPARENT_KEY, button, label)
 from ui.editor import AddStockDialog, AlertDialog, ChoiceDialog, StockEditor
+from ui.mini_tracker import MiniTrackerWindow
 from market_clock import utcnow
 
 # "monitor" is optional: None = stay on the monitor the widget is on, "primary", or a 0-based index
@@ -47,6 +48,7 @@ class EditPanel(tk.Frame):
         button(top, "+ Add stock", self._add, bg="#3B82F6").pack(side="left")
         self.btn_mute = button(top, "", self._mute)
         self.btn_mute.pack(side="left", padx=6)
+        button(top, "◱ Mini Tracker", view.toggle_mini).pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
@@ -223,6 +225,13 @@ class WidgetView:
         self._active_tooltip_tag: str | None = None
         self._tip_win: tk.Toplevel | None = None
         self._tip_lbl: tk.Label | None = None
+        self.mini: MiniTrackerWindow | None = None
+        self.ctrl.add_quote_listener(lambda: self.root.after(0, self._refresh_mini))
+        try:
+            if self.ctrl.get_mini_tracker_state().get("enabled"):
+                self.root.after(100, self.toggle_mini)
+        except Exception:
+            pass
         root.bind_all("<Button>", self._touch, add="+")
         root.bind_all("<Key>", self._touch, add="+")
         root.bind_all("<Escape>", self._escape, add="+")
@@ -516,6 +525,17 @@ class WidgetView:
             self._bind_tooltip(mtag, "Alerts muted")
             hx = c.bbox(m_item)[2] + 8
 
+        # 5. Mini Tracker Button
+        mini_open = self.mini is not None and self.mini.winfo_exists()
+        mini_tag = "status_mini_tracker"
+        mini_col = "#60A5FA" if mini_open else GREY
+        mini_item = self._t(hx, y, "◱ Mini", mini_col, self.fs, tags=(mini_tag,))
+        self._bind_tooltip(mini_tag, "Hide floating Mini Tracker" if mini_open else "Show floating Mini Tracker")
+        c.tag_bind(mini_tag, "<Button-1>", lambda e: self.toggle_mini())
+        c.tag_bind(mini_tag, "<Enter>", lambda e: c.config(cursor="hand2"), add="+")
+        c.tag_bind(mini_tag, "<Leave>", lambda e: c.config(cursor=""), add="+")
+        hx = c.bbox(mini_item)[2] + 8
+
         y += lh + 2
 
         # ---- Stock rows ----------------------------------------------------------------------------
@@ -620,3 +640,64 @@ class WidgetView:
             else:
                 self._idle_job = self.root.after(1000, check)
         self._idle_job = self.root.after(1000, check)
+
+    # ---- mini tracker ------------------------------------------------------------------------------
+    def toggle_mini(self):
+        if self.mini is not None and self.mini.winfo_exists():
+            self.mini.hide()
+            self.mini = None
+        else:
+            self.ctrl.set_mini_tracker_state({"enabled": True})
+            self.mini = MiniTrackerWindow(
+                self.root,
+                get_state=self.ctrl.get_mini_tracker_state,
+                set_state=self.ctrl.set_mini_tracker_state,
+                get_rows=self._mini_rows,
+                get_alerts=self._mini_alerts,
+                acknowledge=self.ctrl.notifier.acknowledge_latest,
+                on_closed=self._on_mini_closed,
+            )
+        self.refresh()
+
+    def _on_mini_closed(self):
+        self.mini = None
+        self.refresh()
+
+    def _refresh_mini(self):
+        if self.mini is not None and self.mini.winfo_exists():
+            self.mini.refresh()
+
+    def _mini_rows(self) -> list[dict]:
+        flashing = self.flashing()
+        out = []
+        for s in self.ctrl.wl.symbols:
+            row = self.ctrl.rows.get(s.symbol)
+            t = row.tick if row else None
+            price = float(t.price) if (t and t.price > 0) else None
+            pct = None
+            if t:
+                if t.change_pct is not None:
+                    pct = float(t.change_pct)
+                elif t.prev_close and t.prev_close > 0:
+                    pct = float((t.price - t.prev_close) / t.prev_close * 100)
+            alert_badge = None
+            if s.symbol in flashing:
+                alert_badge = "ALERT"
+            elif s.category in ("SELL", "RISK"):
+                alert_badge = s.category
+            out.append({
+                "symbol": s.symbol,
+                "price": price,
+                "change_pct": pct,
+                "category": s.category,
+                "alert": alert_badge,
+            })
+        return out
+
+    def _mini_alerts(self) -> tuple[int, str]:
+        latest = getattr(self.ctrl.notifier, "_latest", None)
+        if latest and not latest.get("acked"):
+            prio = latest.get("priority", "HIGH")
+            level = "critical" if prio == "HIGH" else "warn"
+            return 1, level
+        return 0, "warn"

@@ -113,6 +113,7 @@ class AppController:
         self.extra_problems: list[ProblemIconView] = []   # extensible for >3 simultaneous problem tests
         self._notified_invalid_keys: set[int] = set()
         self._last_session: Optional[Session] = None
+        self._quote_listeners: list[Callable] = []
 
     @staticmethod
     def _run_inline(fn, cb):
@@ -200,6 +201,11 @@ class AppController:
                     "zone": self.engine.state["symbols"].get(stock.symbol, {}).get("zone"), "time": now.isoformat()}
         self.dispatch(events)
         self._save_state()
+        for fn in list(self._quote_listeners):
+            try:
+                fn()
+            except Exception:
+                log.exception("quote listener failed")
 
     def on_invalid_key(self, key_num: int, code: int, now: datetime) -> None:
         """Immediate one-time desktop notification when a key returns HTTP 401/403."""
@@ -346,6 +352,22 @@ class AppController:
             self.store.save_state(self.engine.state)
         except OSError:
             log.exception("could not save state.json")
+
+    def get_mini_tracker_state(self) -> dict:
+        return dict(self.engine.state.get("mini_tracker", {}))
+
+    def set_mini_tracker_state(self, patch: dict) -> None:
+        st = self.engine.state.setdefault("mini_tracker", {})
+        st.update(patch)
+        self._save_state()
+
+    def add_quote_listener(self, fn: Callable) -> None:
+        if fn not in self._quote_listeners:
+            self._quote_listeners.append(fn)
+
+    def remove_quote_listener(self, fn: Callable) -> None:
+        if fn in self._quote_listeners:
+            self._quote_listeners.remove(fn)
 
     def symbols(self) -> list:
         return [s.symbol for s in self.wl.symbols]
