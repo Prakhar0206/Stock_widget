@@ -290,3 +290,71 @@ def test_status_strip_mini_tracker_button(tk_app):
     assert len(items_after) > 0
     view.toggle_mini()
     assert view.mini is None
+
+
+def test_end_to_end_alert_flow_in_mini_tracker(tk_app):
+    root, ctrl, view, layer, st = tk_app
+    view.toggle_mini()
+    assert view.mini is not None
+
+    # Simulate an incoming unacknowledged HIGH alert
+    ctrl.notifier._latest = {
+        "text": "AAPL reached $215.00",
+        "priority": "HIGH",
+        "acked": False,
+        "escalated": False,
+    }
+    view._refresh_mini()
+    assert view.mini._alerting is True
+    assert "🚨 1 Alert" in view.mini.center.cget("text")
+
+    # Acknowledge via clicking the center pill
+    view.mini._center_click(None)
+    assert ctrl.notifier._latest["acked"] is True
+    assert view.mini._alerting is False
+    assert view.mini.center.cget("text") == "Mini Tracker"
+
+
+def test_watchlist_update_propagates_to_mini_tracker(tk_app):
+    root, ctrl, view, layer, st = tk_app
+    view.toggle_mini()
+    assert view.mini is not None
+
+    from models import StockConfig
+    # Add new stock
+    new_s = StockConfig("GOOGL", "WATCH", "Alphabet", False, None, None, {}, [])
+    ctrl.add_stock(new_s)
+
+    # Deliver tick for GOOGL
+    t_goog = tick("180.00", "GOOGL", T0, 175)
+    ctrl.on_ticks([t_goog], T0)
+    root.update_idletasks()
+
+    rows = view._mini_rows()
+    symbols = [r["symbol"] for r in rows]
+    assert "GOOGL" in symbols
+
+    # Remove stock
+    ctrl.remove_stock("GOOGL")
+    rows2 = view._mini_rows()
+    symbols2 = [r["symbol"] for r in rows2]
+    assert "GOOGL" not in symbols2
+
+
+def test_edit_mode_and_mini_tracker_coexistence(tk_app):
+    root, ctrl, view, layer, st = tk_app
+    view.toggle_mini()
+    assert view.mini is not None
+    assert view.mini.winfo_exists()
+
+    # Enter Edit Mode
+    view.enter_edit()
+    assert view.editing is True
+    assert view.mini.winfo_exists()
+
+    # Exit Edit Mode
+    view.exit_edit()
+    assert view.editing is False
+    assert view.mini.winfo_exists()
+    view.toggle_mini()
+
