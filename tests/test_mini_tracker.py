@@ -457,7 +457,8 @@ def test_mini_tracker_translucent_window(tk_app):
         assert str(win.header.cget("highlightbackground")) not in ("", KEY)   # outlined header
         for row in win.rows_frame.winfo_children():
             assert int(row.cget("highlightthickness")) >= 1                   # outlined rows
-            assert row.cget("bg") != KEY
+            assert str(row.cget("highlightbackground")) not in ("", KEY)
+            assert row.cget("bg") == KEY                                       # transparent background, not a black box
     finally:
         win.destroy()
 

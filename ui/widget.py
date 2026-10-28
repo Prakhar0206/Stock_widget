@@ -24,9 +24,10 @@ COLORS = {"up": GREEN, "down": RED, "neutral": GREY, "amber": AMBER, "dim": DIM}
 DIM_DOT_COLORS = {"green": "#1E5631", "amber": "#785116", "red": "#6E1D1D"}
 PULSE_DOT_COLORS = {"green": "#86EFAC", "amber": "#FCD34D", "red": "#FCA5A5"}
 FLASH_BG = "#4B5563"
-TOGGLE_W, TOGGLE_H, TOGGLE_GAP = 38, 20, 14      # Mini Tracker switch (far right of the header)
-TOGGLE_OFF = {"track": "#1F2937", "outline": "#6B7280", "thumb": "#0B0F14", "thumb_outline": "#9CA3AF"}
-TOGGLE_ON = {"track": ACCENT, "outline": ACCENT, "thumb": "#06201C", "thumb_outline": "#06201C"}
+TOGGLE_W, TOGGLE_H, TOGGLE_GAP = 32, 16, 12      # Mini Tracker switch (far right of the header)
+TOTAL_MINI_W = 68
+TOGGLE_OFF = {"track": TRANSPARENT_KEY, "outline": "#9CA3AF", "thumb": "#E5E7EB", "thumb_outline": ""}
+TOGGLE_ON = {"track": ACCENT, "outline": ACCENT, "thumb": "#0B0F14", "thumb_outline": ""}
 IDLE_EDIT_S = 60
 
 
@@ -531,7 +532,7 @@ class WidgetView:
         # 5. Mini Tracker switch: reserve room now, draw at the far right once the width is known
         mini_open = self.mini_open
         header_y, header_mid = y, mid
-        hx_end = hx + TOGGLE_GAP + TOGGLE_W
+        hx_end = hx + TOGGLE_GAP + TOTAL_MINI_W
 
         y += lh + 2
 
@@ -559,7 +560,7 @@ class WidgetView:
         total_w = max(wrap, table_w, hx_end - pad) + 2 * pad + (lk["shadow_offset"] if lk["shadow_color"] else 0) + 8
         total_h = y + pad + (lk["shadow_offset"] if lk["shadow_color"] else 0)
         right_edge = total_w - pad - (lk["shadow_offset"] if lk["shadow_color"] else 0) - 8
-        self._draw_mini_toggle(right_edge - TOGGLE_W, header_mid, mini_open)
+        self._draw_mini_toggle(right_edge - TOTAL_MINI_W, header_mid, mini_open)
         c.config(width=total_w, height=total_h)
         self.layer.fit(total_w, total_h)
         if new_fetch:
@@ -574,18 +575,27 @@ class WidgetView:
         return self.mini is not None
 
     def _draw_mini_toggle(self, x1: int, cy: int, on: bool) -> None:
-        """iOS-style pill switch: outlined + dark thumb on the left (off), filled accent + thumb
-        on the right (on). Every item carries the 'status_mini_tracker' tag, so one click target."""
+        """Pill switch matching reference design:
+        Label 'Mini' on left + pill toggle on right.
+        OFF: hollow outline track with light thumb on left.
+        ON: filled accent track with dark thumb on right."""
         c, tag = self.canvas, "status_mini_tracker"
         st = TOGGLE_ON if on else TOGGLE_OFF
-        y1, x2, y2 = cy - TOGGLE_H // 2, x1 + TOGGLE_W, cy - TOGGLE_H // 2 + TOGGLE_H
-        c.create_polygon(rounded_rect_points(x1, y1, x2, y2, TOGGLE_H // 2), smooth=True,
+
+        lbl_col = ACCENT if on else GREY
+        lh = self.fs.metrics("linespace")
+        lbl_item = self._t(x1, cy - lh // 2, "Mini", lbl_col, self.fs, tags=(tag,))
+        bbox = c.bbox(lbl_item)
+        sw_x = (bbox[2] + 6) if bbox else (x1 + 30)
+
+        y1, x2, y2 = cy - TOGGLE_H // 2, sw_x + TOGGLE_W, cy - TOGGLE_H // 2 + TOGGLE_H
+        c.create_polygon(rounded_rect_points(sw_x, y1, x2, y2, TOGGLE_H // 2), smooth=True,
                          fill=st["track"], outline=st["outline"], width=2,
                          tags=(tag, "mini_toggle_track"))
-        d, m = TOGGLE_H - 8, 4
-        tx = x2 - m - d if on else x1 + m
-        c.create_oval(tx, y1 + m, tx + d, y1 + m + d, fill=st["thumb"], outline=st["thumb_outline"],
-                      width=1 if on else 2, tags=(tag, "mini_toggle_thumb"))
+        d, m = TOGGLE_H - 6, 3
+        tx = x2 - m - d if on else sw_x + m
+        c.create_oval(tx, y1 + m, tx + d, y1 + m + d, fill=st["thumb"], outline=st.get("thumb_outline", ""),
+                      width=1, tags=(tag, "mini_toggle_thumb"))
         self._bind_tooltip(tag, "Disable Mini Tracker" if on else "Enable Mini Tracker")
         c.tag_bind(tag, "<Button-1>", self.on_mini_toggle_click)
         c.tag_bind(tag, "<Enter>", lambda e: c.config(cursor="hand2"), add="+")

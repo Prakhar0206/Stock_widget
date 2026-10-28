@@ -727,6 +727,7 @@ GetWindowLongPtrW = _proto(
     ctypes.c_void_p, HWND, ctypes.c_int)
 IsWindow = _proto(user32.IsWindow, wintypes.BOOL, HWND)
 GA_ROOT, VK_LBUTTON = 2, 0x01
+SWP_REFRESH = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
 _orphaned_procs = []     # subclass procs we could not unhook; they must stay alive
 
 
@@ -840,12 +841,27 @@ class SelectiveClickThrough:
             _orphaned_procs.append(proc)
         self._old = self._proc = self._proc_ptr = None
 
-    @staticmethod
-    def _set_transparent(hwnd, on):
-        ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
-        want = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
-        if want != ex:
-            SetWindowLongW(hwnd, GWL_EXSTYLE, want)
+    def _targets(self):
+        hwnd = self.hwnd
+        if not hwnd or not IsWindow(hwnd):
+            return []
+        try:
+            wid = self.widget.winfo_id()
+        except Exception:
+            wid = None
+        targets = [hwnd]
+        if wid and wid != hwnd and IsWindow(wid):
+            targets.append(wid)
+        return targets
+
+    def _set_transparent(self, hwnd, on):
+        targets = self._targets() if self.hwnd else ([hwnd] if (hwnd and IsWindow(hwnd)) else [])
+        for h in targets:
+            ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
+            want = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
+            if want != ex:
+                SetWindowLongW(h, GWL_EXSTYLE, want)
+                SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
 
     def is_click_through(self):
         return bool(self.hwnd and (GetWindowLongW(self.hwnd, GWL_EXSTYLE) or 0) & WS_EX_TRANSPARENT)
