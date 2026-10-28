@@ -11,6 +11,11 @@ import sys
 import threading
 from ctypes import wintypes
 
+try:
+    from hit_testing import hit_code, should_be_solid
+except ImportError:
+    from .hit_testing import hit_code, should_be_solid
+
 if sys.platform != "win32":
     raise ImportError("desktop_layer only runs on Windows")
 
@@ -716,113 +721,160 @@ class DesktopLayer:
 # ----------------------------------------------------------------------------
 # Selective click-through for floating companion windows (Mini Tracker)
 # ----------------------------------------------------------------------------
-_active_selective = {}
+GetAncestor = _proto(user32.GetAncestor, HWND, HWND, wintypes.UINT)
+GetWindowLongPtrW = _proto(
+    user32["GetWindowLongPtrW" if ctypes.sizeof(ctypes.c_void_p) == 8 else "GetWindowLongW"],
+    ctypes.c_void_p, HWND, ctypes.c_int)
+IsWindow = _proto(user32.IsWindow, wintypes.BOOL, HWND)
+GA_ROOT, VK_LBUTTON = 2, 0x01
+_orphaned_procs = []     # subclass procs we could not unhook; they must stay alive
 
 
-def _get_window_rect(hwnd):
-    r = wintypes.RECT()
-    GetWindowRect(hwnd, ctypes.byref(r))
-    return r
+def toplevel_hwnd(widget):
+    """The real top-level HWND of a Tk window. Tk's winfo_id() is the inner child window; the
+    styles (WS_EX_TRANSPARENT ...) must go on the wrapper above it. Re-resolve whenever needed:
+    Tk may re-create the wrapper (overrideredirect / alpha / transparentcolor changes)."""
+    wid = widget.winfo_id()
+    return GetAncestor(wid, GA_ROOT) or GetParent(wid) or wid
 
 
-SWP_REFRESH = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+class SelectiveClickThrough:
+    """Everything outside `solid_rects_fn()` (screen rects, e.g. the header) passes mouse clicks
+    to the windows underneath; the solid rects stay clickable.
 
-
-def setup_selective_clickthrough(hwnd, header_height, poll_ms=30, tk_root=None):
-    """Make everything below `header_height` px (int or callable -> int) click-through.
-
-    Two cooperating mechanisms:
-      1. WM_NCHITTEST subclass returning HTTRANSPARENT below the header.
-      2. A cursor poller (needs `tk_root` for .after) that toggles
-         WS_EX_TRANSPARENT with SWP_FRAMECHANGED on the window depending on
-         whether the cursor is over the header. This makes click-through
-         work across other applications.
-    Call teardown_selective_clickthrough(hwnd) to undo.
+    * A cursor poller toggles WS_EX_TRANSPARENT (needs WS_EX_LAYERED) on the top-level window:
+      cursor over a solid rect -> solid, anywhere else -> click-through. This is what lets clicks
+      reach OTHER applications.
+    * A WM_NCHITTEST subclass answers HTTRANSPARENT outside the solid rects as a second layer.
+    * The HWND is resolved on every tick, so a re-created Tk wrapper window is picked up again.
     """
-    if hwnd in _active_selective:
-        return
-    hh = header_height if callable(header_height) else (lambda: header_height)
-    chwnd = getattr(tk_root, "winfo_id", lambda: None)() if tk_root else None
-    targets = [h for h in (hwnd, chwnd) if h]
-    st = {"hh": hh, "old": None, "proc": None, "job": None, "root": tk_root, "targets": targets}
 
-    def _wndproc(h, msg, wparam, lparam):
-        if msg == WM_NCHITTEST:
-            x = ctypes.c_short(lparam & 0xFFFF).value
-            y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
-            r = _get_window_rect(h)
-            if not (r.left <= x < r.right and r.top <= y < r.bottom):
-                return HTTRANSPARENT
-            if (y - r.top) >= hh():
-                return HTTRANSPARENT
-            return HTCLIENT
-        return CallWindowProcW(st["old"], h, msg, wparam, lparam)
+    def __init__(self, widget, solid_rects_fn, poll_ms=25):
+        self.widget, self.solid_rects_fn, self.poll_ms = widget, solid_rects_fn, poll_ms
+        self.hwnd = None
+        self.active = False
+        self._job = None
+        self._old = self._proc = self._proc_ptr = None
+        self._pt = wintypes.POINT()
 
-    st["proc"] = WNDPROC(_wndproc)
-    for h in targets:
-        ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
-        SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED)
-        if SetWindowPos:
-            SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
-    st["old"] = SetWindowLongPtrW(
-        hwnd, GWLP_WNDPROC, ctypes.cast(st["proc"], ctypes.c_void_p))
-    _active_selective[hwnd] = st
+    # ---- lifecycle -------------------------------------------------------------------------
+    def start(self):
+        if self.active:
+            return
+        self.active = True
+        self._tick()
 
-    if tk_root is not None:
-        pt = wintypes.POINT()
-
-        def _poll():
-            if hwnd not in _active_selective:
-                return
+    def stop(self):
+        self.active = False
+        if self._job is not None:
             try:
-                GetCursorPos(ctypes.byref(pt))
-                r = _get_window_rect(hwnd)
-                in_hdr = (r.left <= pt.x < r.right and
-                          r.top <= pt.y < r.top + hh())
-                for h in targets:
-                    ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
-                    want = ex & ~WS_EX_TRANSPARENT if in_hdr else ex | WS_EX_TRANSPARENT
-                    if want != ex:
-                        SetWindowLongW(h, GWL_EXSTYLE, want)
-                        if SetWindowPos:
-                            SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
+                self.widget.after_cancel(self._job)
             except Exception:
                 pass
-            finally:
-                if hwnd in _active_selective:
-                    try:
-                        if tk_root.winfo_exists():
-                            st["job"] = tk_root.after(poll_ms, _poll)
-                        else:
-                            _active_selective.pop(hwnd, None)
-                    except Exception:
-                        _active_selective.pop(hwnd, None)
+            self._job = None
+        hwnd = self.hwnd
+        self._unhook()
+        if hwnd and IsWindow(hwnd):
+            self._set_transparent(hwnd, False)
+        self.hwnd = None
 
-        _poll()
-
-
-def teardown_selective_clickthrough(hwnd):
-    st = _active_selective.pop(hwnd, None)
-    if not st:
-        return
-    if st.get("job") and st.get("root") is not None:
+    # ---- internals -------------------------------------------------------------------------
+    def _rects(self):
         try:
-            st["root"].after_cancel(st["job"])
+            return list(self.solid_rects_fn())
+        except Exception:
+            return []
+
+    def _resolve(self):
+        try:
+            hwnd = toplevel_hwnd(self.widget)
+        except Exception:
+            return None
+        return hwnd if hwnd and IsWindow(hwnd) else None
+
+    def _bind(self, hwnd):
+        if hwnd == self.hwnd:
+            return
+        self._unhook()
+        self.hwnd = hwnd
+        ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
+        if not ex & WS_EX_LAYERED:      # WS_EX_TRANSPARENT click-through needs a layered window
+            SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+            try:
+                alpha = float(self.widget.attributes("-alpha"))
+            except Exception:
+                alpha = 1.0
+            SetLayeredWindowAttributes(hwnd, 0, int(max(0.0, min(1.0, alpha)) * 255), LWA_ALPHA)
+        self._hook(hwnd)
+
+    def _hook(self, hwnd):
+        def _wndproc(h, msg, wparam, lparam):
+            try:
+                if msg == WM_NCHITTEST and self.active:
+                    x = ctypes.c_short(lparam & 0xFFFF).value
+                    y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+                    return hit_code(x, y, self._rects())
+            except Exception:
+                pass
+            return CallWindowProcW(self._old, h, msg, wparam, lparam)
+
+        proc = WNDPROC(_wndproc)
+        ptr = ctypes.cast(proc, ctypes.c_void_p).value
+        old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ptr)
+        if old:
+            self._old, self._proc, self._proc_ptr = old, proc, ptr
+        else:                           # could not subclass: the style poller still works alone
+            self._old = self._proc = self._proc_ptr = None
+
+    def _unhook(self):
+        hwnd, proc = self.hwnd, self._proc
+        if not (hwnd and proc and self._old):
+            self._old = self._proc = self._proc_ptr = None
+            return
+        try:
+            if IsWindow(hwnd) and GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == self._proc_ptr:
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, self._old)
+            else:
+                _orphaned_procs.append(proc)    # still in the chain (or window gone): keep alive
+        except Exception:
+            _orphaned_procs.append(proc)
+        self._old = self._proc = self._proc_ptr = None
+
+    @staticmethod
+    def _set_transparent(hwnd, on):
+        ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
+        want = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
+        if want != ex:
+            SetWindowLongW(hwnd, GWL_EXSTYLE, want)
+
+    def is_click_through(self):
+        return bool(self.hwnd and (GetWindowLongW(self.hwnd, GWL_EXSTYLE) or 0) & WS_EX_TRANSPARENT)
+
+    def poll_once(self):
+        """One poll step (also callable directly, e.g. from tests)."""
+        hwnd = self._resolve()
+        if not hwnd:
+            return
+        self._bind(hwnd)
+        GetCursorPos(ctypes.byref(self._pt))
+        solid = should_be_solid(self._pt.x, self._pt.y, self._rects(),
+                                button_down=key_down(VK_LBUTTON),
+                                currently_solid=not self.is_click_through())
+        self._set_transparent(hwnd, not solid)
+
+    def _tick(self):
+        self._job = None
+        if not self.active:
+            return
+        try:
+            if not self.widget.winfo_exists():
+                self.active = False
+                return
+            self.poll_once()
         except Exception:
             pass
-    if st.get("old"):
-        try:
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, st["old"])
-        except Exception:
-            pass
-    targets = st.get("targets", [hwnd])
-    for h in targets:
-        try:
-            ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
-            SetWindowLongW(h, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
-            if SetWindowPos:
-                SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
-        except Exception:
-            pass
-
-
+        if self.active:
+            try:
+                self._job = self.widget.after(self.poll_ms, self._tick)
+            except Exception:
+                self.active = False
