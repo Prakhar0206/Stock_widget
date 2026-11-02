@@ -262,9 +262,17 @@ class MiniTrackerWindow(tk.Toplevel):
 
     def header_screen_rect(self):
         """The header in screen pixels - the part that stays clickable when pinned."""
-        self.header.update_idletasks()
-        x, y = self.header.winfo_rootx(), self.header.winfo_rooty()
-        return x, y, x + self.header.winfo_width(), y + self.header.winfo_height()
+        try:
+            self.header.update_idletasks()
+            rx, ry = self.header.winfo_rootx(), self.header.winfo_rooty()
+            rw, rh = self.header.winfo_width(), self.header.winfo_height()
+            if rw > 10 and rh > 10 and (rx != 0 or ry != 0):
+                return rx, ry, rx + rw, ry + rh
+        except Exception:
+            pass
+        wx, wy = self.winfo_x(), self.winfo_y()
+        ww = max(WIDTH, self.winfo_width())
+        return wx, wy, wx + ww, wy + HEADER_H + PAD * 2
 
     # -- dragging (disabled when pinned)
     def _drag_start(self, e):
@@ -319,6 +327,10 @@ class MiniTrackerWindow(tk.Toplevel):
             l, t, r, b = _primary_work_area()
             x, y = r - WIDTH - MARGIN, b - h - MARGIN
         self._autosize(anchor=(int(x), int(y)))
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def _on_wheel(self, e):
         if not self._overflow:

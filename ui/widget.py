@@ -26,7 +26,7 @@ PULSE_DOT_COLORS = {"green": "#86EFAC", "amber": "#FCD34D", "red": "#FCA5A5"}
 FLASH_BG = "#4B5563"
 TOGGLE_W, TOGGLE_H, TOGGLE_GAP = 32, 16, 12      # Mini Tracker switch (far right of the header)
 TOTAL_MINI_W = 68
-TOGGLE_OFF = {"track": TRANSPARENT_KEY, "outline": "#9CA3AF", "thumb": "#E5E7EB", "thumb_outline": ""}
+TOGGLE_OFF = {"track": "#1E293B", "outline": "#64748B", "thumb": "#F1F5F9", "thumb_outline": ""}
 TOGGLE_ON = {"track": ACCENT, "outline": ACCENT, "thumb": "#0B0F14", "thumb_outline": ""}
 IDLE_EDIT_S = 60
 
@@ -52,7 +52,7 @@ class EditPanel(tk.Frame):
         button(top, "+ Add stock", self._add, bg="#3B82F6").pack(side="left")
         self.btn_mute = button(top, "", self._mute)
         self.btn_mute.pack(side="left", padx=6)
-        button(top, "◱ Mini Tracker", view.toggle_mini).pack(side="left", padx=6)
+        button(top, "Mini Tracker", view.toggle_mini, bg="#10B981" if view.mini_open else "#374151").pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
