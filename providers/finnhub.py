@@ -132,7 +132,6 @@ class FinnhubProvider(QuoteProvider):
         self._multi = len(keys) > 1             # failover and quarantine gating only exist with 2+ keys
         self._pool_lock = threading.Lock()
         self._next = 0                          # slot pointer: next key to lead a slot
-        self._last_succeeded_idx: Optional[int] = None
         self._calls = [0] * len(self._slots)    # attempts per slot (diagnostics)
         self.quarantined_until: dict = {}       # key -> monotonic deadline after a 429
         self.rejected_until: dict = {}          # key -> monotonic deadline after a 401/403
@@ -154,31 +153,6 @@ class FinnhubProvider(QuoteProvider):
     @property
     def key_count(self) -> int:
         return len(self._keys)
-
-    def update_keys(self, api_key: str | list[str]) -> None:
-        """Update keys at runtime and immediately clear cooldown/rejection states so updated keys
-        are probed right away."""
-        keys = normalize_keys(api_key)
-        with self._pool_lock:
-            self._keys = keys
-            self._slots = keys or [None]
-            self._multi = len(keys) > 1
-            self._next = 0
-            self._last_succeeded_idx = None
-            self._calls = [0] * len(self._slots)
-            self.quarantined_until.clear()
-            self.rejected_until.clear()
-            self._rate_limit_strikes.clear()
-            self._rate_limited_active.clear()
-            self._rejected_active.clear()
-            self._notified_invalid_keys.clear()
-            self._invalid_key_events.clear()
-            self._ext_regular_cache.clear()
-        with self._lock:
-            if keys:
-                self._s.headers[TOKEN_HEADER] = keys[0]
-            else:
-                self._s.headers.pop(TOKEN_HEADER, None)
 
     def _usable(self, key, now: float) -> bool:           # caller holds _pool_lock
         return (self.quarantined_until.get(key, 0.0) <= now
@@ -287,7 +261,6 @@ class FinnhubProvider(QuoteProvider):
         """Rotation advances to the NEXT key after the one that last SUCCEEDED."""
         with self._pool_lock:
             n = len(self._slots)
-            self._last_succeeded_idx = idx
             self._next = (idx + 1) % n
 
     def _on_rate_limited(self, idx: int) -> RateLimited:

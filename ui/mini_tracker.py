@@ -23,9 +23,9 @@ except ImportError:
     work_area_for_point = None
 
 try:
-    from ui.common import ACCENT, AMBER, BG, BG2, BTN, DIM, FG, FONT, FONT_B, GREEN, GREY, MUTED, RED
+    from ui.common import ACCENT, AMBER, BG, BG2, BTN, FG, GREEN, GREY, MUTED, RED
 except ImportError:
-    from .common import ACCENT, AMBER, BG, BG2, BTN, DIM, FG, FONT, FONT_B, GREEN, GREY, MUTED, RED
+    from .common import ACCENT, AMBER, BG, BG2, BTN, FG, GREEN, GREY, MUTED, RED
 
 MARGIN = 24
 HEADER_H = 30

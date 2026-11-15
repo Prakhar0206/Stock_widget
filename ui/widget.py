@@ -397,12 +397,6 @@ class WidgetView:
             except tk.TclError:
                 pass
 
-    @property
-    def active_tooltip_text(self) -> str:
-        if self._active_tooltip_tag is None:
-            return ""
-        return self.tooltips.get(self._active_tooltip_tag, "")
-
     def pulse_heartbeat(self):
         """Manually trigger the pulse animation (useful for testing or demo)."""
         self._trigger_heartbeat_pulse()

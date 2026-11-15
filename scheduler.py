@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 from config import BudgetError, Config, check_budget
 from data_checks import Backoff
-from market_clock import MarketCalendar, Session, is_active_session, utcnow
+from market_clock import MarketCalendar, is_active_session, utcnow
 from providers.base import MalformedResponse, NetworkFailure, ProviderError, QuoteProvider, RateLimited
 
 log = logging.getLogger("saw.scheduler")

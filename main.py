@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from config import (BudgetError, Config, check_budget, data_dir, get_api_key,  # noqa: F401 (get_api_key kept for tests)
+from config import (BudgetError, Config, check_budget, data_dir,
                     get_api_keys, load_config, min_poll_seconds)
 from market_clock import Session
 

@@ -25,10 +25,6 @@ except ImportError:
 LEVEL_CHOICES = {"Price at or above": "level_above", "Price at or below": "level_below", "Leaves a zone": "zone_exit"}
 
 
-def _pct_text(p) -> str:
-    return "" if p is None else fmt_pct(q2(p))
-
-
 def range_text(lo, hi) -> str:
     f = lambda x: fmt_pct(Decimal(x))
     if lo is None:
@@ -710,7 +706,6 @@ class AddStockDialog(tk.Toplevel):
         super().__init__(master, bg=BG)
         self.ctrl, self.on_added = ctrl, on_added
         self._checked: Optional[str] = None
-        self._price = None
         self._closed = False
         n, cap = len(ctrl.symbols()), ctrl.cfg.max_symbols
         if n >= cap:                                   # blueprint 9.6: going past the cap needs a config change
@@ -798,7 +793,7 @@ class AddStockDialog(tk.Toplevel):
             self._checked = None
             self.btn_add.config(state="disabled")
             return
-        self._checked, self._price = sym, tick.price
+        self._checked = sym
         self.lbl_status.config(text=f"{sym}: {tick.price:.2f} ({tick.source})", fg=GREEN)
         self.btn_add.config(state="normal")
         if self.v_cat.get() == "BUY" and not self.v_ep.get():

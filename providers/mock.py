@@ -16,10 +16,6 @@ NETWORK = "network"      # raises NetworkFailure
 MALFORMED = "malformed"  # raises MalformedResponse
 
 
-def flat(price, n):
-    return [price] * n
-
-
 def gap(before, after, n_before=3, n_after=3):
     return [before] * n_before + [after] * n_after
 
