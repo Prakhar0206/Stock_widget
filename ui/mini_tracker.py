@@ -3,15 +3,16 @@
 Adapter contract (wired in ui/widget.py):
     get_state() -> dict            # the "mini_tracker" block of state.json
     set_state(dict) -> None        # merge + persist
-    get_rows()  -> list[dict]      # {"symbol","price","change_pct","category","alert"}
+    get_rows()  -> list[dict]      # {"symbol","price","change_pct","category","alert","flashing"}
     get_alerts() -> (count, level) # level: "warn" (amber) | "critical" (red)
     acknowledge() -> None          # ctrl.notifier.acknowledge_latest
     on_closed() -> None            # sync the main-widget Mini toggle switch
 
-Look: a glass HUD. The window colour-keys its background (Windows `-transparentcolor`) and uses a
-window alpha, so only the outlined header and row "chips" float over other windows.
-Pinned (📌): every row is click-through; only the header stays clickable.
+Look: a translucent dark panel matching the main widget palette (ui/common.py).
+Always interactive and draggable; scrolls on long watchlists.
 """
+from __future__ import annotations
+
 import ctypes
 import sys
 import tkinter as tk
@@ -19,36 +20,28 @@ import tkinter.font as tkfont
 from ctypes import wintypes
 
 try:
-    import desktop_layer
-except ImportError:                      # not Windows (or run as a package)
-    try:
-        from .. import desktop_layer
-    except ImportError:
-        desktop_layer = None
+    from ui.common import ACCENT, AMBER, BG, BG2, BTN, DIM, FG, FONT, FONT_B, GREEN, GREY, MUTED, RED
+except ImportError:
+    from .common import ACCENT, AMBER, BG, BG2, BTN, DIM, FG, FONT, FONT_B, GREEN, GREY, MUTED, RED
 
 MARGIN = 24
 HEADER_H = 30
 ROW_H = 24
-ROW_GAP = 3
+ROW_GAP = 2
 PAD = 4
-WIDTH = 250
-ALPHA = 0.90
+WIDTH = 260
+ALPHA = 0.92
+BORDER = "#444444"
+FLASH_BG = "#4B5563"
+UP, DOWN, FLAT = GREEN, RED, GREY
 CATEGORIES = ["ALL", "SELL", "HOLD", "BUY", "WATCH"]
-DEFAULTS = {"enabled": False, "pinned": False, "pos_x": None, "pos_y": None,
+DEFAULTS = {"enabled": False, "pos_x": None, "pos_y": None,
             "category_filter": "ALL", "selected_symbols": []}
 
-KEY = "#010203"                          # colour-key: fully transparent (and click-through) pixels
-GLASS, HDR_BG, BG = KEY, KEY, KEY        # transparent background with sleek outlines
-EDGE, EDGE_HI = "#374151", "#00FFCC"
-EDGE_ROW = "#2D3748"
-MUTED, MUTED_DIM = "#9CA3AF", "#6B7280"
-UP, DOWN, FLAT = "#34D399", "#F87171", "#9CA3AF"
-AMBER, RED, ACCENT = "#F59E0B", "#EF4444", "#00FFCC"
-PIN_ON_BG = "#0E4D45"
 FONT_UI = ("Segoe UI", 9, "bold")
 FONT_ROW = ("Consolas", 10)
-FONT_ICON = ("Segoe UI Emoji", 9)
-FONT_PILL = ("Segoe UI", 9, "bold")
+FONT_ICON = ("Segoe UI", 9, "bold")
+FONT_PILL = ("Segoe UI", 8, "bold")
 
 
 # ---------------------------------------------------------------- Win32 / geometry utils
@@ -112,15 +105,11 @@ def rounded_rect_points(x1, y1, x2, y2, r):
             x1, y2, x1, y2 - r, x1, y2 - r, x1, y1 + r, x1, y1 + r, x1, y1]
 
 
-def apply_glass(win, alpha=ALPHA):
-    """Translucent window with a colour-keyed background. Both are Windows features; elsewhere
-    the calls are skipped/ignored and the KEY colour just shows as near-black."""
+def apply_panel_style(win, alpha=ALPHA):
+    """Apply the dark main-widget panel background and window translucency."""
+    win.configure(bg=BG)
     try:
         win.attributes("-alpha", alpha)
-    except tk.TclError:
-        pass
-    try:
-        win.attributes("-transparentcolor", KEY)
     except tk.TclError:
         pass
 
@@ -128,8 +117,8 @@ def apply_glass(win, alpha=ALPHA):
 class PillButton(tk.Canvas):
     """Rounded pill button drawn on a canvas. `parent_bg` fills the corners."""
 
-    def __init__(self, parent, text, command=None, parent_bg=KEY, fill=KEY,
-                 fg="#E5E7EB", outline=EDGE_HI, hover="#1F2937", padx=12, pady=3, font=FONT_PILL):
+    def __init__(self, parent, text, command=None, parent_bg=BG, fill=BTN,
+                 fg=FG, outline=BORDER, hover="#4B4B4B", padx=10, pady=3, font=FONT_PILL):
         f = tkfont.Font(font=font)
         w, h = f.measure(text) + 2 * padx, f.metrics("linespace") + 2 * pady
         super().__init__(parent, width=w, height=h, bg=parent_bg, highlightthickness=0, cursor="hand2")
@@ -141,9 +130,12 @@ class PillButton(tk.Canvas):
         self.bind("<Enter>", lambda e: self.itemconfig(self.shape, fill=self._hover))
         self.bind("<Leave>", lambda e: self.itemconfig(self.shape, fill=self._fill))
 
-    def restyle(self, fill, fg, outline=None):
+    def restyle(self, fill, fg, outline=None, hover=None):
+        """Update pill fill, text color, and optional outline/hover colors."""
         self._fill = fill
-        self.itemconfig(self.shape, fill=fill, **({"outline": outline} if outline else {}))
+        if hover is not None:
+            self._hover = hover
+        self.itemconfig(self.shape, fill=fill, **({"outline": outline} if outline is not None else {}))
         self.itemconfig(self.label, fill=fg)
 
 
@@ -165,50 +157,58 @@ def _wheel_steps(e):
     return int(-d / 120) or (-1 if d > 0 else 1 if d < 0 else 0)
 
 
+def _bind_drag(widget, on_start, on_move, on_end):
+    """Attach left-button drag handlers to a widget."""
+    widget.bind("<ButtonPress-1>", on_start, add="+")
+    widget.bind("<B1-Motion>", on_move, add="+")
+    widget.bind("<ButtonRelease-1>", on_end, add="+")
+
+
 # ------------------------------------------------------------- Mini Tracker
 class MiniTrackerWindow(tk.Toplevel):
+    """Floating dark-themed mini watchlist window."""
+
     def __init__(self, master, get_state, set_state, get_rows, get_alerts,
                  acknowledge, on_closed=None):
-        super().__init__(master, bg=KEY)
+        super().__init__(master, bg=BG)
         self._get_state, self._set_state = get_state, set_state
         self._get_rows, self._get_alerts = get_rows, get_alerts
         self._acknowledge, self._on_closed = acknowledge, on_closed
         self._drag = None
-        self._pinned = False
         self._settings = None
         self._flash_on = False
         self._flash_job = None
-        self._ct = None                      # desktop_layer.SelectiveClickThrough while pinned
         self._visible, self._badges = [], []
         self._alerting = False
         self._overflow = False
         self._body_h = self._content_h = 0
 
         self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        apply_glass(self)
+        try:
+            self.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        apply_panel_style(self, ALPHA)
 
-        # shell = the window outline; its interior is colour-keyed so only the chips are visible
-        self.shell = tk.Frame(self, bg=KEY, highlightthickness=1,
-                              highlightbackground=EDGE, highlightcolor=EDGE)
+        self.shell = tk.Frame(self, bg=BG, highlightthickness=1,
+                              highlightbackground=BORDER, highlightcolor=BORDER)
         self.shell.pack(fill="both", expand=True)
         self._build_header()
-        self.body = tk.Canvas(self.shell, bg=KEY, highlightthickness=0, bd=0,
+        self.body = tk.Canvas(self.shell, bg=BG, highlightthickness=0, bd=0,
                               yscrollincrement=ROW_H + ROW_GAP, width=WIDTH - 2 - 2 * PAD, height=ROW_H)
         self.body.pack(fill="x", padx=PAD, pady=(0, PAD))
-        self.rows_frame = tk.Frame(self.body, bg=KEY)
+        self.rows_frame = tk.Frame(self.body, bg=BG)
         self._rows_win = self.body.create_window((0, 0), window=self.rows_frame, anchor="nw",
                                                  width=WIDTH - 2 - 2 * PAD)
 
-        for w in (self.shell, self.body):
-            w.bind("<ButtonPress-1>", self._drag_start, add="+")
-            w.bind("<B1-Motion>", self._drag_move, add="+")
-            w.bind("<ButtonRelease-1>", self._drag_end, add="+")
+        for w in (self.shell, self.body, self.rows_frame):
+            _bind_drag(w, self._drag_start, self._drag_move, self._drag_end)
+        _bind_wheel(self.body, self._on_wheel)
+        _bind_wheel(self.rows_frame, self._on_wheel)
 
         st = self._state()
         self.refresh()
         self._place_initial(st)
-        self.set_pinned(bool(st.get("pinned")))
         self._flash_tick()
 
     # -- state helpers
@@ -222,76 +222,50 @@ class MiniTrackerWindow(tk.Toplevel):
 
     # -- header
     def _build_header(self):
-        self.header = tk.Frame(self.shell, bg=HDR_BG, height=HEADER_H, highlightthickness=1,
-                               highlightbackground=EDGE_HI, highlightcolor=EDGE_HI)
+        self.header = tk.Frame(self.shell, bg=BG2, height=HEADER_H, highlightthickness=1,
+                               highlightbackground=BORDER, highlightcolor=BORDER)
         self.header.pack(fill="x", padx=PAD, pady=(PAD, ROW_GAP))
         self.header.pack_propagate(False)
-
-        self.pin_btn = tk.Label(self.header, text="📍", font=FONT_ICON, bg=KEY, fg=MUTED_DIM,
-                                cursor="hand2", padx=8, highlightthickness=1,
-                                highlightbackground=KEY)
-        self.pin_btn.pack(side="left", padx=(2, 0))
-        self.pin_btn.bind("<Button-1>", lambda e: self.set_pinned(not self._pinned))
 
         self.close_btn = self._icon("✕", self._close)
         self.gear_btn = self._icon("⚙", self.open_settings)
 
         self.center = tk.Label(self.header, text="Mini Tracker", font=FONT_UI,
-                               bg=KEY, fg="#E5E7EB")
+                               bg=BG2, fg=FG)
         self.center.pack(side="left", expand=True)
-        self.center.bind("<Button-1>", self._center_click)
 
-        for w in (self.header, self.center):  # drag handles
-            w.bind("<ButtonPress-1>", self._drag_start, add="+")
-            w.bind("<B1-Motion>", self._drag_move, add="+")
-            w.bind("<ButtonRelease-1>", self._drag_end, add="+")
-        # wheel over the (always solid) header scrolls the list, even while pinned
+        # Bind drag before _center_click so an alerting click checks _alerting before refresh() clears it.
         for w in (self.header, self.center):
-            w.bind("<MouseWheel>", self._on_wheel, add="+")
-            w.bind("<Button-4>", self._on_wheel, add="+")
-            w.bind("<Button-5>", self._on_wheel, add="+")
+            _bind_drag(w, self._drag_start, self._drag_move, self._drag_end)
+        self.center.bind("<Button-1>", self._center_click, add="+")
+        _bind_wheel(self.header, self._on_wheel)
 
     def _icon(self, text, cmd):
-        b = tk.Label(self.header, text=text, font=FONT_ICON, bg=KEY, fg=MUTED,
+        b = tk.Label(self.header, text=text, font=FONT_ICON, bg=BG2, fg=MUTED,
                      cursor="hand2", padx=7)
-        b.pack(side="right")
+        b.pack(side="right", fill="y")
         b.bind("<Button-1>", lambda e: cmd())
-        b.bind("<Enter>", lambda e: b.config(fg="#FFFFFF"))
-        b.bind("<Leave>", lambda e: b.config(fg=MUTED))
+        b.bind("<Enter>", lambda e: b.config(fg="#FFFFFF", bg=BTN))
+        b.bind("<Leave>", lambda e: b.config(fg=MUTED, bg=BG2))
         return b
 
-    def header_screen_rect(self):
-        """The header in screen pixels - the part that stays clickable when pinned."""
-        try:
-            self.header.update_idletasks()
-            rx, ry = self.header.winfo_rootx(), self.header.winfo_rooty()
-            rw, rh = self.header.winfo_width(), self.header.winfo_height()
-            if rw > 10 and rh > 10 and (rx != 0 or ry != 0):
-                return rx, ry, rx + rw, ry + rh
-        except Exception:
-            pass
-        wx, wy = self.winfo_x(), self.winfo_y()
-        ww = max(WIDTH, self.winfo_width())
-        return wx, wy, wx + ww, wy + HEADER_H + PAD * 2
-
-    # -- dragging (disabled when pinned)
+    # -- dragging
     def _drag_start(self, e):
-        if self._pinned:
+        if getattr(e, "widget", None) is self.center and self._alerting:
             self._drag = None
             return
         self._drag = (e.x_root - self.winfo_x(), e.y_root - self.winfo_y())
 
     def _drag_move(self, e):
-        if self._drag and not self._pinned:
+        if self._drag:
             self.geometry(f"+{e.x_root - self._drag[0]}+{e.y_root - self._drag[1]}")
 
     def _drag_end(self, _e):
         if self._drag:
             self._drag = None
-            if not self._pinned:
-                x, y = _clamp_to_work_area(self.winfo_x(), self.winfo_y(), self.winfo_width(), self.winfo_height())
-                self.geometry(f"+{x}+{y}")
-                self._save(pos_x=x, pos_y=y)
+            x, y = _clamp_to_work_area(self.winfo_x(), self.winfo_y(), self.winfo_width(), self.winfo_height())
+            self.geometry(f"+{x}+{y}")
+            self._save(pos_x=x, pos_y=y)
 
     # -- sizing / positioning
     def _measure(self, x, y):
@@ -337,33 +311,6 @@ class MiniTrackerWindow(tk.Toplevel):
             return
         self.body.yview_scroll(_wheel_steps(e), "units")
 
-    # -- pinning: Option 1 - rows click-through, header stays solid
-    def set_pinned(self, pinned: bool):
-        self._pinned = bool(pinned)
-        if self._pinned:
-            self.pin_btn.config(text="📌", fg=ACCENT, bg=KEY, highlightbackground=ACCENT)
-        else:
-            self.pin_btn.config(text="📍", fg=MUTED_DIM, bg=KEY, highlightbackground=KEY)
-        if self._pinned:
-            self._start_clickthrough()
-        else:
-            self._stop_clickthrough()
-        self._save(pinned=self._pinned)
-
-    def _start_clickthrough(self):
-        if desktop_layer is None or not hasattr(desktop_layer, "SelectiveClickThrough"):
-            return
-        if self._ct is None:
-            self._ct = desktop_layer.SelectiveClickThrough(self, lambda: [self.header_screen_rect()])
-        self._ct.start()
-
-    def _stop_clickthrough(self):
-        if self._ct is not None:
-            try:
-                self._ct.stop()
-            finally:
-                self._ct = None
-
     # -- content
     def _filtered_rows(self):
         st = self._state()
@@ -376,9 +323,9 @@ class MiniTrackerWindow(tk.Toplevel):
             rows = [r for r in rows if (r.get("category") or "").upper() == cat]
         return rows                                   # no cap: show everything that matches
 
-    def _chip(self, height=ROW_H):
-        f = tk.Frame(self.rows_frame, bg=KEY, height=height, highlightthickness=1,
-                     highlightbackground=EDGE_ROW, highlightcolor=EDGE_ROW)
+    def _chip(self, height=ROW_H, bg=BG2):
+        f = tk.Frame(self.rows_frame, bg=bg, height=height, highlightthickness=1,
+                     highlightbackground=BORDER, highlightcolor=BORDER)
         f.pack_propagate(False)
         return f
 
@@ -390,36 +337,34 @@ class MiniTrackerWindow(tk.Toplevel):
             w.destroy()
         self._badges = []
         if not self._visible:
-            chip = self._chip(2 * ROW_H)
+            chip = self._chip(2 * ROW_H, bg=BG2)
             chip.pack(fill="x")
             tk.Label(chip, text="No stocks matching filter", font=("Segoe UI", 8),
-                     bg=KEY, fg=MUTED).pack(fill="both", expand=True)
+                     bg=BG2, fg=MUTED).pack(fill="both", expand=True)
             for it in (chip, *chip.winfo_children()):
-                it.bind("<ButtonPress-1>", self._drag_start, add="+")
-                it.bind("<B1-Motion>", self._drag_move, add="+")
-                it.bind("<ButtonRelease-1>", self._drag_end, add="+")
+                _bind_drag(it, self._drag_start, self._drag_move, self._drag_end)
         for i, r in enumerate(self._visible):
             arrow, color, pct = _fmt_row(r.get("price"), r.get("change_pct"))
-            row = self._chip()
+            row_bg = FLASH_BG if r.get("flashing") else BG2
+            row = self._chip(bg=row_bg)
             row.pack(fill="x", pady=(ROW_GAP if i else 0, 0))
-            price = f"{r['price']:.2f}" if r.get("price") is not None else "--"
-            tk.Label(row, text=f"{r['symbol']:<6}", font=FONT_ROW, bg=KEY,
-                     fg="#E5E7EB", width=6, anchor="w").pack(side="left", padx=(8, 0))
-            tk.Label(row, text=f"{price:>8}", font=FONT_ROW, bg=KEY,
-                     fg="#E5E7EB", anchor="e").pack(side="left")
-            tk.Label(row, text=f" {arrow} {pct}", font=FONT_ROW, bg=KEY,
-                     fg=color).pack(side="left")
+            # Pack right badge first so left columns never push it out of view.
             if r.get("alert"):
                 b = tk.Label(row, text=f"[{r['alert']}]", font=("Segoe UI", 8, "bold"),
-                             bg=KEY, fg=AMBER)
+                             bg=row_bg, fg=AMBER)
                 b.pack(side="right", padx=8)
                 self._badges.append(b)
+            price = f"{r['price']:.2f}" if r.get("price") is not None else "--"
+            tk.Label(row, text=f"{r['symbol']:<6}", font=FONT_ROW, bg=row_bg,
+                     fg=FG, width=6, anchor="w").pack(side="left", padx=(8, 0))
+            tk.Label(row, text=f"{price:>8}", font=FONT_ROW, bg=row_bg,
+                     fg=FG, anchor="e").pack(side="left")
+            tk.Label(row, text=f" {arrow} {pct}", font=FONT_ROW, bg=row_bg,
+                     fg=color).pack(side="left")
             for it in (row, *row.winfo_children()):
-                it.bind("<ButtonPress-1>", self._drag_start, add="+")
-                it.bind("<B1-Motion>", self._drag_move, add="+")
-                it.bind("<ButtonRelease-1>", self._drag_end, add="+")
-        _bind_wheel(self.rows_frame, self._on_wheel)
-        _bind_wheel(self.body, self._on_wheel)
+                _bind_drag(it, self._drag_start, self._drag_move, self._drag_end)
+        for ch in self.rows_frame.winfo_children():
+            _bind_wheel(ch, self._on_wheel)
         self._update_alert_pill()
         self._autosize()
         self.body.yview_moveto(y0 if self._overflow else 0)
@@ -430,11 +375,11 @@ class MiniTrackerWindow(tk.Toplevel):
             col = RED if level == "critical" else AMBER
             icon = "🚨" if level == "critical" else "🔔"
             label = f"{icon} {count} Alert{'s' if count != 1 else ''}"
-            self.center.config(text=f" {label} ", bg=col, fg="#0B0F14", cursor="hand2",
+            self.center.config(text=f" {label} ", bg=col, fg="#111111", cursor="hand2",
                                padx=8, pady=1)
             self._alerting = True
         else:
-            self.center.config(text="Mini Tracker", bg=KEY, fg="#E5E7EB", cursor="",
+            self.center.config(text="Mini Tracker", bg=BG2, fg=FG, cursor="",
                                padx=0, pady=0)
             self._alerting = False
 
@@ -477,10 +422,6 @@ class MiniTrackerWindow(tk.Toplevel):
             except Exception:
                 pass
             self._flash_job = None
-        try:
-            self._stop_clickthrough()
-        except Exception:
-            pass
         if self._settings and self._settings.winfo_exists():
             try:
                 self._settings.destroy()
@@ -492,17 +433,21 @@ class MiniTrackerWindow(tk.Toplevel):
 
 # --------------------------------------------------------- Settings dialog
 class MiniTrackerSettingsDialog(tk.Toplevel):
-    """Glass-styled filter dialog. No selection cap; the list scrolls on long watchlists."""
+    """Dark panel filter dialog matching the main widget. Scrolls on long watchlists."""
 
     def __init__(self, parent, state, get_rows, on_apply):
-        super().__init__(parent, bg=KEY)
+        super().__init__(parent, bg=BG)
         self._on_apply = on_apply
+        self._drag = None
         self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        apply_glass(self, 0.94)
+        try:
+            self.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        apply_panel_style(self, 0.95)
 
-        self.card = tk.Frame(self, bg=KEY, highlightthickness=1,
-                             highlightbackground=ACCENT, highlightcolor=ACCENT)
+        self.card = tk.Frame(self, bg=BG, highlightthickness=1,
+                             highlightbackground=BORDER, highlightcolor=BORDER)
         self.card.pack(fill="both", expand=True)
         card = self.card
 
@@ -510,62 +455,82 @@ class MiniTrackerSettingsDialog(tk.Toplevel):
         sel = set(state.get("selected_symbols") or [])
         rows = get_rows() or []
 
-        hdr = tk.Frame(card, bg=KEY)
-        hdr.pack(fill="x", padx=12, pady=(10, 4))
-        tk.Label(hdr, text="Mini Tracker Filter", font=FONT_UI, bg=KEY,
-                 fg="#E5E7EB").pack(side="left")
-        close_btn = tk.Label(hdr, text="✕", font=FONT_ICON, bg=KEY, fg=MUTED, cursor="hand2")
-        close_btn.pack(side="right")
+        hdr = tk.Frame(card, bg=BG2, height=HEADER_H, highlightthickness=1,
+                       highlightbackground=BORDER, highlightcolor=BORDER)
+        hdr.pack(fill="x", padx=PAD, pady=(PAD, 6))
+        hdr.pack_propagate(False)
+        title_lbl = tk.Label(hdr, text="Mini Tracker Filter", font=FONT_UI, bg=BG2, fg=FG)
+        title_lbl.pack(side="left", padx=(8, 0))
+        close_btn = tk.Label(hdr, text="✕", font=FONT_ICON, bg=BG2, fg=MUTED,
+                             cursor="hand2", padx=7)
+        close_btn.pack(side="right", fill="y")
         close_btn.bind("<Button-1>", lambda e: self.destroy())
-        close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#FFFFFF"))
-        close_btn.bind("<Leave>", lambda e: close_btn.config(fg=MUTED))
+        close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#FFFFFF", bg=BTN))
+        close_btn.bind("<Leave>", lambda e: close_btn.config(fg=MUTED, bg=BG2))
+        for w in (hdr, title_lbl):
+            _bind_drag(w, self._drag_start, self._drag_move, self._drag_end)
 
-        pills = tk.Frame(card, bg=KEY)
-        pills.pack(anchor="w", padx=10)
+        pills = tk.Frame(card, bg=BG)
+        pills.pack(anchor="w", padx=10, pady=(2, 0))
         self._pill_btns = {}
         for c in CATEGORIES:
-            b = PillButton(pills, c, lambda c=c: self._set_cat(c), parent_bg=KEY,
-                           padx=8, pady=2, font=("Segoe UI", 8, "bold"))
+            b = PillButton(pills, c, lambda c=c: self._set_cat(c), parent_bg=BG,
+                           padx=8, pady=2, font=FONT_PILL)
             b.pack(side="left", padx=2)
             self._pill_btns[c] = b
         self._set_cat(self.cat.get(), apply=False)
 
-        self.count_lbl = tk.Label(card, text="", font=("Segoe UI", 8), bg=KEY, fg=MUTED)
+        self.count_lbl = tk.Label(card, text="", font=("Segoe UI", 8), bg=BG, fg=MUTED)
         self.count_lbl.pack(anchor="w", padx=12, pady=(8, 0))
 
         # scrollable checkbox list
         self.vars = {}
-        wrap = tk.Frame(card, bg=KEY)
+        wrap = tk.Frame(card, bg=BG2, highlightthickness=1,
+                        highlightbackground=BORDER, highlightcolor=BORDER)
         wrap.pack(fill="x", padx=10, pady=4)
-        self.list_canvas = tk.Canvas(wrap, bg=KEY, highlightthickness=0, bd=0, width=230, height=40)
-        self.list_canvas.pack(fill="x")
-        self.inner = tk.Frame(self.list_canvas, bg=KEY)
-        self.list_canvas.create_window((0, 0), window=self.inner, anchor="nw", width=230)
-        for r in rows:
-            v = tk.BooleanVar(value=r["symbol"] in sel)
-            self.vars[r["symbol"]] = v
-            tk.Checkbutton(self.inner, text=f"{r['symbol']}  ({r.get('category') or '-'})",
-                           variable=v, command=self._toggle,
-                           bg=KEY, fg="#E5E7EB", selectcolor="#1F2937",
-                           activebackground=KEY, activeforeground="#FFFFFF",
-                           highlightthickness=0, bd=0,
-                           font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        self.list_canvas = tk.Canvas(wrap, bg=BG2, highlightthickness=0, bd=0, width=230, height=40)
+        self.list_canvas.pack(fill="x", padx=2, pady=2)
+        self.inner = tk.Frame(self.list_canvas, bg=BG2)
+        self._inner_win = self.list_canvas.create_window((0, 0), window=self.inner, anchor="nw", width=230)
+        self.list_canvas.bind(
+            "<Configure>",
+            lambda e: self.list_canvas.itemconfig(self._inner_win, width=max(230, e.width)),
+        )
+        if rows:
+            for r in rows:
+                v = tk.BooleanVar(value=r["symbol"] in sel)
+                self.vars[r["symbol"]] = v
+                tk.Checkbutton(self.inner, text=f"{r['symbol']}  ({r.get('category') or '-'})",
+                               variable=v, command=self._toggle,
+                               bg=BG2, fg=FG, selectcolor=BG,
+                               activebackground=BG2, activeforeground="#FFFFFF",
+                               highlightthickness=0, bd=0,
+                               font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=4, pady=1)
+        else:
+            tk.Label(self.inner, text="No stocks in watchlist", font=("Segoe UI", 9),
+                     bg=BG2, fg=MUTED, pady=8).pack(fill="x")
         self.inner.update_idletasks()
         self._content_h = max(1, self.inner.winfo_reqheight())
         self.list_canvas.configure(scrollregion=(0, 0, 230, self._content_h))
         _bind_wheel(self.inner, self._on_wheel)
         _bind_wheel(self.list_canvas, self._on_wheel)
 
-        btns = tk.Frame(card, bg=KEY)
-        btns.pack(fill="x", padx=10, pady=(4, 10))
-        for t, cmd in (("Done", self.destroy), ("Clear", self._clear), ("All", self._select_all)):
-            PillButton(btns, t, cmd, parent_bg=KEY).pack(side="right", padx=3)
+        btns = tk.Frame(card, bg=BG)
+        btns.pack(fill="x", padx=10, pady=(6, 10))
+        PillButton(btns, "Done", self.destroy, parent_bg=BG,
+                   fill=ACCENT, fg="#FFFFFF", outline=ACCENT, hover="#2563EB").pack(side="right", padx=3)
+        PillButton(btns, "Clear", self._clear, parent_bg=BG,
+                   fill=BTN, fg=FG, outline=BORDER).pack(side="right", padx=3)
+        PillButton(btns, "All", self._select_all, parent_bg=BG,
+                   fill=BTN, fg=FG, outline=BORDER).pack(side="right", padx=3)
 
         self._update_count()
         self.update_idletasks()
         w = self.winfo_reqwidth()
+        pl, pt, pr, pb = _work_area_for_rect(parent.winfo_x(), parent.winfo_y(),
+                                             parent.winfo_width(), parent.winfo_height())
         x0 = parent.winfo_x() - w - 8
-        if x0 < 0:
+        if x0 < pl:
             x0 = parent.winfo_x() + parent.winfo_width() + 8
         # cap the list so the dialog fits the monitor's work area
         l, t, r, b = _work_area_for_rect(x0, parent.winfo_y(), w, 200)
@@ -574,11 +539,24 @@ class MiniTrackerSettingsDialog(tk.Toplevel):
         self.list_canvas.config(height=self._list_h)
         self.update_idletasks()
         h = self.winfo_reqheight()
-        y0 = max(0, parent.winfo_y() + parent.winfo_height() - h)
+        y0 = max(t, parent.winfo_y() + parent.winfo_height() - h)
         x0, y0 = _clamp_to_work_area(x0, y0, w, h)
         self.geometry(f"{w}x{h}+{x0}+{y0}")
         self.bind("<Escape>", lambda e: self.destroy())
         self.focus_force()
+
+    def _drag_start(self, e):
+        self._drag = (e.x_root - self.winfo_x(), e.y_root - self.winfo_y())
+
+    def _drag_move(self, e):
+        if self._drag:
+            self.geometry(f"+{e.x_root - self._drag[0]}+{e.y_root - self._drag[1]}")
+
+    def _drag_end(self, _e):
+        if self._drag:
+            self._drag = None
+            x, y = _clamp_to_work_area(self.winfo_x(), self.winfo_y(), self.winfo_width(), self.winfo_height())
+            self.geometry(f"+{x}+{y}")
 
     def _on_wheel(self, e):
         if self._content_h > self.list_canvas.winfo_height():
@@ -588,8 +566,12 @@ class MiniTrackerSettingsDialog(tk.Toplevel):
         self.cat.set(c)
         for name, b in self._pill_btns.items():
             on = name == c
-            b.restyle(ACCENT if on else "#1B2330", "#111111" if on else MUTED,
-                      ACCENT if on else EDGE_HI)
+            b.restyle(
+                fill=ACCENT if on else BTN,
+                fg="#FFFFFF" if on else MUTED,
+                outline=ACCENT if on else BORDER,
+                hover="#2563EB" if on else "#4B4B4B",
+            )
         if apply:
             self._push()
 

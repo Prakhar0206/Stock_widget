@@ -7,10 +7,10 @@ import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable
 
-from ui.common import (AMBER, BG, BG2, DIM, FG, GREEN, GREY, MUTED, RED,
-                       TRANSPARENT_KEY, button, label)
+from ui.common import (ACCENT, AMBER, BG, BG2, BTN, DIM, FG, GREEN, GREY,
+                       MUTED, RED, TRANSPARENT_KEY, button, label)
 from ui.editor import AddStockDialog, AlertDialog, ChoiceDialog, StockEditor
-from ui.mini_tracker import ACCENT, MiniTrackerWindow, rounded_rect_points
+from ui.mini_tracker import MiniTrackerWindow, rounded_rect_points
 from market_clock import utcnow
 
 # "monitor" is optional: None = stay on the monitor the widget is on, "primary", or a 0-based index
@@ -26,8 +26,8 @@ PULSE_DOT_COLORS = {"green": "#86EFAC", "amber": "#FCD34D", "red": "#FCA5A5"}
 FLASH_BG = "#4B5563"
 TOGGLE_W, TOGGLE_H, TOGGLE_GAP = 32, 16, 12      # Mini Tracker switch (far right of the header)
 TOTAL_MINI_W = 68
-TOGGLE_OFF = {"track": "#1E293B", "outline": "#64748B", "thumb": "#F1F5F9", "thumb_outline": ""}
-TOGGLE_ON = {"track": ACCENT, "outline": ACCENT, "thumb": "#0B0F14", "thumb_outline": ""}
+TOGGLE_OFF = {"track": BG2, "outline": MUTED, "thumb": FG, "thumb_outline": ""}
+TOGGLE_ON = {"track": ACCENT, "outline": ACCENT, "thumb": "#FFFFFF", "thumb_outline": ""}
 IDLE_EDIT_S = 60
 
 
@@ -52,7 +52,8 @@ class EditPanel(tk.Frame):
         button(top, "+ Add stock", self._add, bg="#3B82F6").pack(side="left")
         self.btn_mute = button(top, "", self._mute)
         self.btn_mute.pack(side="left", padx=6)
-        button(top, "Mini Tracker", view.toggle_mini, bg="#10B981" if view.mini_open else "#374151").pack(side="left", padx=6)
+        self.btn_mini = button(top, "Mini Tracker", view.toggle_mini, bg=ACCENT if view.mini_open else BTN)
+        self.btn_mini.pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
@@ -160,6 +161,7 @@ class EditPanel(tk.Frame):
         )
         self.lbl_warn.config(text="\n".join(self.ctrl.all_warnings()))
         self.btn_mute.config(text="Unmute" if hv.muted else "Mute")
+        self.btn_mini.config(bg=ACCENT if self.view.mini_open else BTN)
         flashing = self.view.flashing()
         for rv in self.ctrl.row_views(now):
             if rv.symbol not in self._rows:
@@ -253,7 +255,8 @@ class WidgetView:
     def flash(self, symbol: str, ms: int = 2000):
         self._flash[symbol] = time.monotonic() + ms / 1000
         self.refresh()
-        self.root.after(ms + 60, self.refresh)
+        self._refresh_mini()
+        self.root.after(ms + 60, lambda: (self.refresh(), self._refresh_mini()))
 
     def refresh(self):
         if self.editing:
@@ -578,7 +581,7 @@ class WidgetView:
         """Pill switch matching reference design:
         Label 'Mini' on left + pill toggle on right.
         OFF: hollow outline track with light thumb on left.
-        ON: filled accent track with dark thumb on right."""
+        ON: filled accent track with white thumb on right."""
         c, tag = self.canvas, "status_mini_tracker"
         st = TOGGLE_ON if on else TOGGLE_OFF
 
@@ -729,6 +732,7 @@ class WidgetView:
                 "change_pct": pct,
                 "category": s.category,
                 "alert": alert_badge,
+                "flashing": s.symbol in flashing,
             })
         return out
 
