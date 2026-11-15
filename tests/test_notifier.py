@@ -187,12 +187,53 @@ def test_windows_toast_runs_on_a_background_thread_and_never_blocks_the_caller()
 
 
 def test_windows_toast_disabled_without_a_library_and_errors_are_swallowed(monkeypatch):
+    import sys
+    import types
     from notifier import WindowsBackends
+
+    # Simulate missing toast libraries so WindowsBackends initializes with _mode = None
+    monkeypatch.setitem(sys.modules, "windows_toasts", None)
+    monkeypatch.setitem(sys.modules, "winotify", None)
     wb = WindowsBackends()
-    wb._mode = None
+    assert wb._mode is None
     wb.toast("x", False, True)                               # no library: silently does nothing
-    wb._mode = "wt"                                          # library "present" but the real call fails here
-    wb._toast_blocking("x", False)                           # must not raise (windows_toasts is not installed on Linux)
+
+    # Stub failing windows_toasts module so real OS WinRT toasts are never triggered on Windows
+    wt_mod = types.ModuleType("windows_toasts")
+    wt_audio_mod = types.ModuleType("windows_toasts.toast_audio")
+
+    class _FakeToaster:
+        def __init__(self, _name):
+            pass
+
+        def show_toast(self, _toast):
+            raise RuntimeError("boom")
+
+    wt_mod.Toast = lambda *a, **kw: ("toast", a, kw)
+    wt_mod.ToastScenario = type("ToastScenario", (), {"Alarm": "alarm"})
+    wt_mod.WindowsToaster = _FakeToaster
+    wt_audio_mod.ToastAudio = lambda silent=True: ("audio", silent)
+    monkeypatch.setitem(sys.modules, "windows_toasts", wt_mod)
+    monkeypatch.setitem(sys.modules, "windows_toasts.toast_audio", wt_audio_mod)
+
+    wb._mode = "wt"
+    wb._toaster = None
+    wb._toast_blocking("x", False)                           # must swallow toast failure without raising
+
+    # Stub failing winotify module too
+    wn_mod = types.ModuleType("winotify")
+
+    class _FakeNotification:
+        def __init__(self, *a, **kw):
+            pass
+
+        def show(self):
+            raise RuntimeError("wn boom")
+
+    wn_mod.Notification = _FakeNotification
+    monkeypatch.setitem(sys.modules, "winotify", wn_mod)
+    wb._mode = "wn"
+    wb._toast_blocking("x", True)                            # must swallow winotify failure without raising
 
 
 def test_quiet_hours_popup_appears_without_sound():

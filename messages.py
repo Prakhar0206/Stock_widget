@@ -30,11 +30,14 @@ def describe(ev: AlertEvent) -> str:
         tag = (TAGS.get(ev.zone or "") or "").lower()
         return f"Entered {tag}{_pct_phrase(ev)}"
     if ev.kind == "zone_exit":
-        what = f"Left the {ev.condition.replace('left ', '')} range"
+        target = ev.condition[5:] if ev.condition.startswith("left ") else ev.condition
+        what = f"Left the {target}" if target.endswith((" zone", " range")) else f"Left the {target} range"
         note = f" ({ev.note})" if ev.note else ""
         return f"{what}{note}{_pct_phrase(ev)}"
     if ev.kind == "feed_stale":
         return "Price feed has not updated recently"
+    if ev.kind == "key_invalid":
+        return ev.condition or "API key invalid"
     note = f" ({ev.note})" if ev.note else ""
     return f"Price {ev.condition}{note}{_pct_phrase(ev)}"
 
@@ -43,9 +46,11 @@ def format_message(ev: AlertEvent, now: datetime) -> str:
     if ev.kind == "feed_stale":
         return "\n".join([f"[{ev.priority}] FEED · {ev.label} · {fmt_ist(ev.time)} IST", describe(ev),
                           "alerts for stale prices are paused", f"Source {SOURCE_NAMES.get(ev.source, ev.source)}."])
-    line1 = f"[{ev.priority}] {ev.symbol} · {ev.label} · {ev.price:.2f} · {fmt_ist(ev.time)} IST"
+    if ev.kind == "key_invalid":
+        return f"[{ev.priority}] {ev.condition or 'API key invalid'}"
+    line1 = f"[{ev.priority}] {ev.symbol} · {ev.label} · {q2(ev.price):.2f} · {fmt_ist(ev.time)} IST"
     if ev.net_estimate is not None:
-        n = ev.net_estimate
+        n = q2(ev.net_estimate)
         line3 = f"est. net {'+' if n >= 0 else '-'}${abs(n):.2f}"
         tail = "Estimate before tax. "
     elif ev.category == "BUY":

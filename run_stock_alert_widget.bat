@@ -113,6 +113,15 @@ rem ---------------------------------------------------------------------------
 rem 5. Route tool subcommands (test, startup)
 rem ---------------------------------------------------------------------------
 if /i "%CMD%"=="test" (
+  ".venv\Scripts\python.exe" -c "import pytest" >nul 2>&1 || (
+    echo Installing dev/test dependencies from requirements-dev.txt...
+    ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements-dev.txt
+    if errorlevel 1 (
+      echo [ERROR] Could not install pytest from requirements-dev.txt.
+      pause
+      exit /b 1
+    )
+  )
   if "%~2"=="" (
     echo Running test suite...
     ".venv\Scripts\python.exe" -m pytest -q
@@ -137,27 +146,50 @@ if /i "%CMD%"=="startup" (
 )
 
 rem ---------------------------------------------------------------------------
-rem 6. Verify FINNHUB_API_KEY (live mode only; auto-load from User Registry)
+rem 6. Verify Finnhub API key (live mode only; env, User Registry, or config.json)
 rem ---------------------------------------------------------------------------
-if "%IS_DEMO%"=="0" (
-  if "%FINNHUB_API_KEY%"=="" (
-    for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v FINNHUB_API_KEY 2^>nul ^| findstr /i "FINNHUB_API_KEY"') do set "FINNHUB_API_KEY=%%B"
+set "HAS_API_KEY=0"
+if not "%FINNHUB_API_KEY%"=="" set "HAS_API_KEY=1"
+if not "%FINNHUB_API_KEYS%"=="" set "HAS_API_KEY=1"
+if not "%FINNHUB_API_KEY_1%"=="" set "HAS_API_KEY=1"
+
+if "%IS_DEMO%"=="0" if "%HAS_API_KEY%"=="0" (
+  for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v FINNHUB_API_KEY 2^>nul ^| findstr /i "FINNHUB_API_KEY"') do (
+    set "FINNHUB_API_KEY=%%B"
+    set "HAS_API_KEY=1"
+  )
+)
+if "%IS_DEMO%"=="0" if "%HAS_API_KEY%"=="0" (
+  for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v FINNHUB_API_KEYS 2^>nul ^| findstr /i "FINNHUB_API_KEYS"') do (
+    set "FINNHUB_API_KEYS=%%B"
+    set "HAS_API_KEY=1"
+  )
+)
+if "%IS_DEMO%"=="0" if "%HAS_API_KEY%"=="0" (
+  for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v FINNHUB_API_KEY_1 2^>nul ^| findstr /i "FINNHUB_API_KEY_1"') do (
+    set "FINNHUB_API_KEY_1=%%B"
+    set "HAS_API_KEY=1"
+  )
+)
+if "%IS_DEMO%"=="0" if "%HAS_API_KEY%"=="0" if exist "%APPDATA%\StockAlertWidget\config.json" (
+  findstr /i "\"api_keys\"" "%APPDATA%\StockAlertWidget\config.json" >nul 2>&1 && (
+    ".venv\Scripts\python.exe" -c "import json, os, sys; d = json.load(open(os.path.join(os.environ['APPDATA'], 'StockAlertWidget', 'config.json'), encoding='utf-8')); sys.exit(0 if d.get('api_keys') else 1)" >nul 2>&1 && set "HAS_API_KEY=1"
   )
 )
 
-if "%IS_DEMO%"=="0" (
-  if "%FINNHUB_API_KEY%"=="" (
-    echo [WARNING] FINNHUB_API_KEY is not set. The widget will start but will not fetch live prices.
-    echo Set it once in PowerShell:  setx FINNHUB_API_KEY "your-api-key"
-    echo Or run demo mode instead:   %~nx0 demo
-    pause
-  )
+if "%IS_DEMO%"=="0" if "%HAS_API_KEY%"=="0" (
+  echo [WARNING] No Finnhub API key was found in environment variables or config.json.
+  echo The widget will start but will not fetch live prices.
+  echo Set it once in PowerShell:  setx FINNHUB_API_KEY "your-api-key"
+  echo Or run demo mode instead:   %~nx0 demo
+  pause
 )
 
 rem ---------------------------------------------------------------------------
 rem 7. Launch widget (demo, console/debug, or background pythonw)
 rem ---------------------------------------------------------------------------
 if /i "%CMD%"=="demo" (
+  if not "%~2"=="" set "MOCK_SPEED=%~2"
   start "" ".venv\Scripts\pythonw.exe" "main.py" --mock %2 %3 %4 %5 %6 %7 %8 %9
   exit /b 0
 )

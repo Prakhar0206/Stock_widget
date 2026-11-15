@@ -25,9 +25,12 @@ def _dec(v, what: str) -> Decimal:
     if isinstance(v, bool) or not isinstance(v, (int, float, str, Decimal)):
         raise ValidationError(f"{what} must be a number.")
     try:
-        return v if isinstance(v, Decimal) else Decimal(str(v))
+        d = v if isinstance(v, Decimal) else Decimal(str(v))
     except Exception:
         raise ValidationError(f"{what} must be a number.")
+    if not d.is_finite():
+        raise ValidationError(f"{what} must be a finite number.")
+    return d
 
 
 def _pos(v, what):
@@ -61,20 +64,25 @@ def parse_alert(a: dict, stock: StockConfig, cfg: Config) -> Alert:
     if t == "zone_exit":
         if price is not None or pct is not None:
             raise ValidationError(f"{stock.symbol}/{aid}: a zone alert has no price or percent.")
-        if zone not in ALL_ZONE_NAMES:
-            raise ValidationError(f"{stock.symbol}/{aid}: unknown zone {zone!r}.")
+        if zone not in ZONE_NAMES_BY_CAT.get(stock.category, ()):
+            raise ValidationError(f"{stock.symbol}/{aid}: unknown zone {zone!r} for {stock.category}.")
+    elif t == "pct_move_day":
+        if pct is None or price is not None:
+            raise ValidationError(f"{stock.symbol}/{aid}: a daily move alert requires a percent and cannot set a price.")
+        if not (0 < pct <= PCT_MAX):
+            raise ValidationError(f"{stock.symbol}/{aid}: a daily move percent must be above 0 and at most +500.")
     else:
         if (price is None) == (pct is None):
             raise ValidationError(f"{stock.symbol}/{aid}: set a price or a percent, not both and not neither.")
         if pct is not None and not (PCT_MIN <= pct <= PCT_MAX):
             raise ValidationError(f"{stock.symbol}/{aid}: percent must be between -90 and +500.")
-        if pct is not None and t != "pct_move_day" and stock.category == "WATCH":
+        if pct is not None and stock.category == "WATCH":
             raise ValidationError(f"{stock.symbol}/{aid}: WATCH stocks have no base for a percent alert; use a price.")
-        if t == "pct_move_day" and pct is not None and pct <= 0:
-            raise ValidationError(f"{stock.symbol}/{aid}: a daily move percent must be above 0.")
     cd = a.get("cooldown_min", cfg.cooldown_min)
-    if isinstance(cd, bool) or not isinstance(cd, (int, Decimal)) or cd < 1:
-        raise ValidationError(f"{stock.symbol}/{aid}: cooldown_min must be a whole number of minutes (1 or more).")
+    if (isinstance(cd, bool) or not isinstance(cd, (int, Decimal))
+            or (isinstance(cd, Decimal) and (not cd.is_finite() or cd != int(cd)))
+            or not (1 <= int(cd) <= 10080)):
+        raise ValidationError(f"{stock.symbol}/{aid}: cooldown_min must be a whole number of minutes (1 to 10080).")
     return Alert(id=aid, type=t, label=label, priority=prio, enabled=bool(a.get("enabled", True)),
                  mode=mode, price=price, pct=pct, zone=zone, cooldown_min=int(cd), note=str(a.get("note", "")))
 
@@ -113,6 +121,8 @@ def parse_stock(d: dict, cfg: Config) -> StockConfig:
                      noisy=bool(d.get("noisy", False)))
     p = d.get("position")
     if p is not None:
+        if not isinstance(p, dict):
+            raise ValidationError(f"{sym}: position must be an object.")
         fee = p.get("actual_buy_fee")
         fee = _dec(fee, f"{sym} actual buy fee") if fee is not None else None
         if fee is not None and fee < 0:
@@ -121,6 +131,8 @@ def parse_stock(d: dict, cfg: Config) -> StockConfig:
                                _pos(p.get("avg_price"), f"{sym} average price"), fee)
     e = d.get("planned_entry")
     if e is not None:
+        if not isinstance(e, dict):
+            raise ValidationError(f"{sym}: planned_entry must be an object.")
         sh = e.get("shares")
         st.planned_entry = PlannedEntry(_pos(e.get("price"), f"{sym} planned entry"),
                                         _pos(sh, f"{sym} planned shares") if sh is not None else None)
@@ -128,10 +140,15 @@ def parse_stock(d: dict, cfg: Config) -> StockConfig:
         raise ValidationError(f"{sym}: {cat} needs shares and an average price.")
     if cat == "BUY" and st.planned_entry is None:
         raise ValidationError(f"{sym}: BUY needs a planned entry price.")
-    z = d.get("zones", {}) or {}
+    z_raw = d.get("zones")
+    if z_raw is not None and not isinstance(z_raw, dict):
+        raise ValidationError(f"{sym}: zones must be an object.")
+    z = z_raw or {}
     for name, ov in z.items():
         if name not in ZONE_DEFAULTS:
             raise ValidationError(f"{sym}: unknown zone {name!r}.")
+        if not isinstance(ov, dict):
+            raise ValidationError(f"{sym}: zone {name} override must be an object.")
         clean = {}
         if "pct" in ov:
             clean["pct"] = _dec(ov["pct"], f"{sym} {name} threshold")
@@ -143,8 +160,11 @@ def parse_stock(d: dict, cfg: Config) -> StockConfig:
             clean["enabled"] = bool(ov["enabled"])
         st.zones[name] = clean
     check_thresholds(st, cfg.zone_defaults)
+    alerts_raw = d.get("alerts")
+    if alerts_raw is not None and not isinstance(alerts_raw, list):
+        raise ValidationError(f"{sym}: alerts must be a list.")
     seen = set()
-    for a in d.get("alerts", []) or []:
+    for a in alerts_raw or []:
         al = parse_alert(a, st, cfg)
         if al.id in seen:
             raise ValidationError(f"{sym}: duplicate alert id {al.id!r}.")
@@ -170,7 +190,7 @@ def parse_watchlist(data: dict, cfg: Config) -> Watchlist:
     if len(wl.symbols) > cfg.max_symbols:
         raise ValidationError(f"{len(wl.symbols)} stocks is above max_symbols ({cfg.max_symbols}).")
     try:
-        check_budget(len(wl.symbols), cfg.poll_seconds)
+        check_budget(len(wl.symbols), cfg.poll_seconds, num_keys=getattr(cfg, "num_keys", 1))
     except BudgetError as exc:
         raise ValidationError(str(exc))
     return wl

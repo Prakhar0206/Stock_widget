@@ -3,6 +3,7 @@ which is why it can be tested with the mock provider and a fake notifier."""
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import math
 from dataclasses import dataclass, field
@@ -12,8 +13,8 @@ from typing import Callable, Optional
 
 from config import Config
 from data_checks import FeedHealth
-from engine import AlertEngine, merge_events
-from market_clock import ET, IST, MarketCalendar, Session, utcnow
+from engine import AlertEngine, Notification, merge_events
+from market_clock import ET, IST, MarketCalendar, Session, is_active_session, utcnow
 from models import ARMED, DISABLED, DONE, AlertEvent, PriceTick, StockConfig, ValidationError, Watchlist
 from positions import q2
 from scheduler import CLOSED_POLL_S
@@ -24,11 +25,28 @@ from zones import TAGS
 log = logging.getLogger("saw.app")
 
 
+def _safe_dec(v) -> Optional[Decimal]:
+    if v is None or v == "" or isinstance(v, bool):
+        return None
+    try:
+        d = v if isinstance(v, Decimal) else Decimal(str(v))
+    except Exception:
+        return None
+    return d if (d.is_finite() and d > 0) else None
+
+
+def _fmt_session_price(p: Optional[Decimal]) -> str:
+    return f"{q2(p):.2f}" if (p is not None and p > 0) else "—"
+
+
 @dataclass
 class RowState:
     tick: Optional[PriceTick] = None       # last good reading
     last_ok: Optional[datetime] = None
     paused: bool = False
+    pre_price: Optional[Decimal] = None
+    reg_price: Optional[Decimal] = None
+    ah_price: Optional[Decimal] = None
 
 
 @dataclass
@@ -44,6 +62,9 @@ class RowView:
     color: str          # up | down | neutral | amber | dim
     age_s: Optional[int]
     warning: str = ""
+    ph_price_text: str = "—"
+    rh_price_text: str = "—"
+    ah_price_text: str = "—"
 
 
 @dataclass
@@ -57,15 +78,16 @@ class ProblemIconView:
 
 @dataclass
 class StatusStripView:
-    session_icon: str                        # "☀️" when regular session open, else "🌙"
-    session_tooltip: str                     # e.g. "US market open" / "US market closed"
+    session_icon: str                        # "🌅" PRE, "☀️" REGULAR, "🌇" AFTER, "🌙" CLOSED
+    session_tooltip: str                     # e.g. "US market open (regular session)" / "US market closed"
     heartbeat_color: str                     # "green" | "amber" | "red"
-    heartbeat_dim: bool                      # True when market is closed
+    heartbeat_dim: bool                      # True when market polling session is inactive
     heartbeat_tooltip: str                   # e.g. "Live, updated 8s ago" / "Market closed, next update in 11 min"
     last_heartbeat_at: Optional[datetime]    # updated on every successful fetch
     problems: list[ProblemIconView] = field(default_factory=list)   # max 3 visible problem icons
     overflow_count: int = 0                  # >0 when >3 problems active (renders "+N")
     overflow_tooltip: str = ""
+    session: str = "REGULAR"
 
 
 @dataclass
@@ -146,10 +168,32 @@ class AppController:
         self._check_provider_invalid_keys(self.now_fn())
 
     def _check_provider_invalid_keys(self, now: datetime) -> None:
+        pool_fn = getattr(self.provider, "pool_status", None)
+        if callable(pool_fn):
+            for item in pool_fn():
+                num = item.get("num")
+                if item.get("state") == "ok" and num is not None:
+                    self._notified_invalid_keys.discard(num)
+                    self.notices.pop(f"auth_{num}", None)
         pop_fn = getattr(self.provider, "pop_invalid_key_events", None)
         if callable(pop_fn):
             for key_num, code in pop_fn():
                 self.on_invalid_key(key_num, code, now)
+
+    def _notify_quote_listeners(self) -> None:
+        for fn in list(self._quote_listeners):
+            try:
+                fn()
+            except Exception:
+                log.exception("quote listener failed")
+
+    def _check_session_transition(self, sess: Session) -> None:
+        if self._last_session is not None and self._last_session != sess:
+            if is_active_session(sess, getattr(self.cfg, "extended_hours", True)):
+                log.info("Session changed (%s -> %s), requesting immediate poll",
+                         self._last_session.name, sess.name)
+                self.poll_now()
+        self._last_session = sess
 
     def session(self, now: datetime) -> Session:
         """Provider market status when it answered recently, else the bundled calendar."""
@@ -179,12 +223,15 @@ class AppController:
         self._check_provider_invalid_keys(now)
         by = {t.symbol: t for t in ticks}
         session = self.session(now)
+        active_sess = is_active_session(session, getattr(self.cfg, "extended_hours", True))
         if ticks:
             self.feed.record_success(now)
             self.last_heartbeat_at = now
             self.last_poll_at = now
             self.feed_kind = "ok"
-        self.feed.note_session(session == Session.REGULAR, now)
+            self.server_down = False
+        self.feed.note_session(active_sess, now)
+        et_date = now.astimezone(ET).strftime("%Y-%m-%d")
         events = []
         for stock in list(self.wl.symbols):
             t = by.get(stock.symbol)
@@ -195,17 +242,52 @@ class AppController:
                 row.tick, row.last_ok = t, now
             events += self.engine.process_tick(stock, t, now, session)
             row.paused = self.engine.is_paused(stock.symbol)
+            ss = self.engine.state.setdefault("symbols", {}).setdefault(stock.symbol, {})
+            if ss.get("session_date") != et_date:
+                ss["session_date"] = et_date
+            if t.price > 0 and not row.paused:
+                t_pre = _safe_dec(getattr(t, "pre_price", None))
+                t_reg = _safe_dec(getattr(t, "reg_price", None))
+                t_ah = _safe_dec(getattr(t, "ah_price", None))
+                if t_pre is not None:
+                    row.pre_price = t_pre
+                    ss["pre_price"] = str(t_pre)
+                elif session == Session.PRE:
+                    row.pre_price = t.price
+                    ss["pre_price"] = str(t.price)
+                elif session == Session.CLOSED and row.pre_price is None:
+                    prev_pre = _safe_dec(ss.get("pre_price"))
+                    if prev_pre is not None:
+                        row.pre_price = prev_pre
+                if t_reg is not None:
+                    row.reg_price = t_reg
+                    ss["reg_price"] = str(t_reg)
+                elif session == Session.REGULAR:
+                    row.reg_price = t.price
+                    ss["reg_price"] = str(t.price)
+                elif session == Session.CLOSED:
+                    if row.reg_price is None:
+                        row.reg_price = _safe_dec(ss.get("reg_price"))
+                    if row.reg_price is None:
+                        row.reg_price = t.price
+                        ss["reg_price"] = str(t.price)
+                if t_ah is not None:
+                    row.ah_price = t_ah
+                    ss["ah_price"] = str(t_ah)
+                elif session == Session.AFTER:
+                    row.ah_price = t.price
+                    ss["ah_price"] = str(t.price)
+                elif session == Session.CLOSED and row.ah_price is None:
+                    prev_ah = _safe_dec(ss.get("ah_price"))
+                    if prev_ah is not None:
+                        row.ah_price = prev_ah
             if session == Session.REGULAR and t.price > 0 and not row.paused:
                 self.engine.state.setdefault("last_regular", {})[stock.symbol] = {
                     "price": str(t.price), "prev_close": str(t.prev_close) if t.prev_close else None,
                     "zone": self.engine.state["symbols"].get(stock.symbol, {}).get("zone"), "time": now.isoformat()}
         self.dispatch(events)
         self._save_state()
-        for fn in list(self._quote_listeners):
-            try:
-                fn()
-            except Exception:
-                log.exception("quote listener failed")
+        self._notify_quote_listeners()
 
     def on_invalid_key(self, key_num: int, code: int, now: datetime) -> None:
         """Immediate one-time desktop notification when a key returns HTTP 401/403."""
@@ -262,7 +344,8 @@ class AppController:
         """Call every few seconds: stale-feed alert (>3 min offline during market hours)."""
         self._check_provider_invalid_keys(now)
         session = self.session(now)
-        self.feed.note_session(session == Session.REGULAR, now)
+        self._check_session_transition(session)
+        self.feed.note_session(is_active_session(session, getattr(self.cfg, "extended_hours", True)), now)
         if self.polling_enabled:
             r = self.feed.check(now)
             if r == "stale":
@@ -308,6 +391,7 @@ class AppController:
         cand.symbols.append(new)
         self._commit(cand)
         self.engine.remove_stock(stock.symbol)       # new stock: its first reading only sets state
+        self._notify_quote_listeners()
         self.poll_now()
 
     def update_stock(self, new: StockConfig, choices: Optional[dict] = None) -> None:
@@ -326,17 +410,19 @@ class AppController:
             self.engine.remove_alert(stock.symbol, aid)
         events = []
         tick = (self.rows.get(stock.symbol) or RowState()).tick
+        sess = self.session(self.now_fn())
         for a in stock.alerts:
             if old_alerts.get(a.id) == a:
                 continue                              # unchanged: keep its state
             if tick is not None:
                 choice = (choices or {}).get(a.id) or "wait_cross"
-                events += self.engine.register_alert(stock, a, tick, self.now_fn(), choice)
+                events += self.engine.register_alert(stock, a, tick, self.now_fn(), choice, session=sess)
             else:
                 st = self.engine.alert_state(stock.symbol, a.id)
                 st.update({"state": ARMED if a.enabled else DISABLED, "cooldown_until": None})
         self.dispatch(events)
         self._save_state()
+        self._notify_quote_listeners()
 
     def remove_stock(self, symbol: str) -> None:
         cand = copy.deepcopy(self.wl)
@@ -346,6 +432,7 @@ class AppController:
         self.engine.state.get("last_regular", {}).pop(symbol, None)
         self.rows.pop(symbol, None)
         self._save_state()
+        self._notify_quote_listeners()
 
     def _save_state(self) -> None:
         try:
@@ -354,11 +441,16 @@ class AppController:
             log.exception("could not save state.json")
 
     def get_mini_tracker_state(self) -> dict:
-        return dict(self.engine.state.get("mini_tracker", {}))
+        raw = self.engine.state.get("mini_tracker")
+        if isinstance(raw, dict):
+            raw.pop("pinned", None)
+            return dict(raw)
+        return {}
 
     def set_mini_tracker_state(self, patch: dict) -> None:
         st = self.engine.state.setdefault("mini_tracker", {})
         st.update(patch)
+        st.pop("pinned", None)
         self._save_state()
 
     def add_quote_listener(self, fn: Callable) -> None:
@@ -371,6 +463,67 @@ class AppController:
 
     def symbols(self) -> list:
         return [s.symbol for s in self.wl.symbols]
+
+    def key_pool_info(self) -> dict:
+        """Read-only summary of configured API keys and their pool health."""
+        pool_fn = getattr(self.provider, "pool_status", None)
+        keys = list(pool_fn()) if callable(pool_fn) else []
+        source = getattr(self.provider, "key_source", None)
+        if not source or source == "unknown":
+            source = "config.json" if self.cfg.api_keys else ("environment" if keys else "none")
+        return {
+            "source": source,
+            "total": len(keys),
+            "ok": sum(1 for k in keys if k.get("state") == "ok"),
+            "rate_limited": sum(1 for k in keys if k.get("state") == "rate_limited"),
+            "rejected": sum(1 for k in keys if k.get("state") == "rejected"),
+            "keys": keys,
+            "reject_code": getattr(self.provider, "_last_reject_code", 401),
+        }
+
+    def send_test_alert(self, now: Optional[datetime] = None) -> None:
+        """Send a synthetic HIGH test alert (audio, toast & popup) without logging or mutating state."""
+        t_now = now or self.now_fn()
+        if self.wl.symbols:
+            first = self.wl.symbols[0]
+            sym, cat = first.symbol, first.category
+            row = self.rows.get(sym)
+            price = row.tick.price if (row and row.tick and row.tick.price > 0) else Decimal("100.00")
+        else:
+            sym, cat = "TEST", "WATCH"
+            price = Decimal("100.00")
+        ev = AlertEvent(
+            symbol=sym,
+            alert_id="__test_alert__",
+            kind="level",
+            label="TEST",
+            priority="HIGH",
+            price=price,
+            time=t_now,
+            source="test",
+            category=cat,
+            condition="test notification",
+            note="Edit Mode test check (audio, toast & popup)",
+        )
+        note = Notification([ev])
+        try:
+            sig = inspect.signature(self.notifier.notify)
+            params = [
+                p for p in sig.parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+            ]
+            accepts_two = any(p.kind == p.VAR_POSITIONAL for p in params) or len(params) >= 2
+        except (TypeError, ValueError):
+            accepts_two = None
+        if accepts_two is False:
+            self.notifier.notify(note)
+        elif accepts_two is True:
+            self.notifier.notify(note, t_now)
+        else:
+            try:
+                self.notifier.notify(note, t_now)
+            except TypeError:
+                self.notifier.notify(note)
 
     # ---- status strip & views ------------------------------------------------------------------
     @staticmethod
@@ -483,13 +636,16 @@ class AppController:
 
     def status_strip(self, now: datetime) -> StatusStripView:
         sess = self.session(now)
-        regular = sess == Session.REGULAR
-        if self._last_session is not None and self._last_session != Session.REGULAR and regular:
-            log.info("Market opened: session switched to REGULAR, requesting immediate poll")
-            self.poll_now()
-        self._last_session = sess
-        session_icon = "☀️" if regular else "🌙"
-        session_tooltip = "US market open (regular session)" if regular else f"US market closed ({sess.value})"
+        self._check_session_transition(sess)
+        extended = getattr(self.cfg, "extended_hours", True)
+        active = is_active_session(sess, extended)
+        _session_meta = {
+            Session.PRE: ("🌅", "US market pre-market (PH)"),
+            Session.REGULAR: ("☀️", "US market open (regular session)"),
+            Session.AFTER: ("🌇", "US market after-hours (AH)"),
+            Session.CLOSED: ("🌙", f"US market closed ({sess.value})"),
+        }
+        session_icon, session_tooltip = _session_meta.get(sess, ("🌙", f"US market closed ({sess.value})"))
 
         all_problems = self._build_problems(now)
         visible_problems = all_problems[:3]
@@ -502,7 +658,7 @@ class AppController:
         # - Degraded (some stocks failing, rate-limited failover, server slow): amber
         # - Healthy: green
         stale = self.feed.stale
-        if self.last_heartbeat_at is not None and regular:
+        if self.last_heartbeat_at is not None and active:
             if (now - self.last_heartbeat_at).total_seconds() >= self.cfg.stale_after_seconds:
                 stale = True
 
@@ -524,23 +680,26 @@ class AppController:
         else:
             hb_color = "green"
 
-        hb_dim = not regular
+        hb_dim = not active
 
         # Heartbeat tooltip
-        if not regular:
+        if not active:
             ref = self.last_poll_at or self.last_heartbeat_at
             if ref is not None:
                 elapsed = max(0.0, (now - ref).total_seconds())
                 rem_min = max(1, int(math.ceil(max(0.0, CLOSED_POLL_S - elapsed) / 60.0)))
             else:
                 rem_min = 15
-            nxt_open = getattr(self.calendar, "next_regular_open", None)
-            if callable(nxt_open):
-                t_open = nxt_open(now)
-                if t_open is not None:
-                    sec_to_open = (t_open - now).total_seconds()
-                    if 0 < sec_to_open < CLOSED_POLL_S:
-                        rem_min = max(1, int(math.ceil(sec_to_open / 60.0)))
+            nxt_sess = getattr(self.calendar, "next_session_open", None)
+            if callable(nxt_sess):
+                t_open = nxt_sess(now, extended)
+            else:
+                nxt_open = getattr(self.calendar, "next_regular_open", None)
+                t_open = nxt_open(now) if callable(nxt_open) else None
+            if t_open is not None:
+                sec_to_open = (t_open - now).total_seconds()
+                if 0 < sec_to_open < CLOSED_POLL_S:
+                    rem_min = max(1, int(math.ceil(sec_to_open / 60.0)))
             hb_tooltip = f"Market closed, next update in {rem_min} min"
         else:
             if hb_color == "red":
@@ -572,6 +731,7 @@ class AppController:
             problems=visible_problems,
             overflow_count=overflow_count,
             overflow_tooltip=overflow_tooltip,
+            session=sess.name,
         )
 
     def header(self, now: datetime) -> HeaderView:
@@ -614,13 +774,22 @@ class AppController:
 
     def row_views(self, now: datetime) -> list:
         sess = self.session(now)
+        active_sess = is_active_session(sess, getattr(self.cfg, "extended_hours", True))
         out = []
         for s in self.wl.symbols:
             row = self.rows.get(s.symbol) or RowState()
             t = row.tick
             active = sum(1 for a in s.alerts if a.enabled and self.engine.alert_state(s.symbol, a.id)["state"] not in (DONE, DISABLED))
+            ss = self.engine.state.get("symbols", {}).get(s.symbol, {})
+            pre = row.pre_price if row.pre_price is not None else _safe_dec(ss.get("pre_price"))
+            reg = (row.reg_price if row.reg_price is not None else
+                   (_safe_dec(ss.get("reg_price")) or
+                    _safe_dec((self.engine.state.get("last_regular", {}).get(s.symbol) or {}).get("price"))))
+            ah = row.ah_price if row.ah_price is not None else _safe_dec(ss.get("ah_price"))
+            ph_txt, rh_txt, ah_txt = _fmt_session_price(pre), _fmt_session_price(reg), _fmt_session_price(ah)
             if t is None:
-                out.append(RowView(s.symbol, s.nickname, "…", "", "", s.category, "", active, "neutral", None))
+                out.append(RowView(s.symbol, s.nickname, "…", "", "", s.category, "", active, "neutral", None, "",
+                                   ph_txt, rh_txt, ah_txt))
                 continue
             chg, pct = t.change, t.change_pct
             if chg is None and t.prev_close:
@@ -632,21 +801,20 @@ class AppController:
                 arrow = "▲" if chg > 0 else ("▼" if chg < 0 else "–")
                 ctext = f"{'+' if chg >= 0 else '-'}{abs(q2(chg)):.2f} ({'+' if pct >= 0 else '-'}{abs(q2(pct)):.2f}%)"
             age = int((now - row.last_ok).total_seconds()) if row.last_ok else None
-            regular = sess == Session.REGULAR
             warn = ""
             # Rows turn amber when feed offline/degraded, stale_after_seconds (3 min), or price jump paused
             stale = (self.feed_kind in ("offline", "degraded") or self.feed.stale or row.paused or
-                     (regular and age is not None and age >= self.cfg.stale_after_seconds))
+                     (active_sess and age is not None and age >= self.cfg.stale_after_seconds))
             if row.paused:
                 warn = "price jump paused"
             if stale:
                 color = "amber"
-            elif not regular:
+            elif not active_sess:
                 color = "dim"
             elif chg is None or chg == 0:
                 color = "neutral"
             else:
                 color = "up" if chg > 0 else "down"
             out.append(RowView(s.symbol, s.nickname, f"{t.price:.2f}", ctext, arrow, s.category,
-                               self.zone_tag(s.symbol), active, color, age, warn))
+                               self.zone_tag(s.symbol), active, color, age, warn, ph_txt, rh_txt, ah_txt))
         return out

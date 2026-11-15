@@ -18,6 +18,29 @@ KEY = "TESTKEY_9f8e7d6c5b4a"
 POSITION_FILES = {"watchlist.json", "watchlist.last_good.json"}
 
 
+import logging as _logging
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _cleanup_privacy_globals():
+    """Ensure saw logger handlers and redaction key globals never leak across tests."""
+    import store as _store
+    saved_keys = set(_store._EXTRA_KEYS_TO_REDACT)
+    root_log = _logging.getLogger("saw")
+    try:
+        yield
+    finally:
+        for h in list(root_log.handlers):
+            root_log.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+        _store._EXTRA_KEYS_TO_REDACT.clear()
+        _store._EXTRA_KEYS_TO_REDACT.update(saved_keys)
+
+
 def test_15_no_key_no_position_data_in_written_files(tmp_path, monkeypatch):
     monkeypatch.setenv("FINNHUB_API_KEY", KEY)
     cfg = Config()

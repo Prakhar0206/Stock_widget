@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-280%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-297%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -15,11 +15,15 @@ An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert en
 ## Highlights & Features
 
 ### 🪟 Floating Mini Tracker HUD (Always-on-Top)
-* **Compact Floating Companion**: A sleek, bottom-right floating widget showing real-time quotes (`Symbol`, `Price`, `Arrow`, `Change %`) without taking desktop space.
-* **Selective Click-Through Pinning**: When pinned (📌), the stock rows become click-through so you can interact with apps behind them, while the header stays interactive for unpinning, settings, and controls.
-* **Dynamic Alert Pill**: The center header turns into an animated alert pill (`[ 🔔 1 Alert ]` / `[ 🚨 1 Alert ]`) that lets you acknowledge active alerts and silence chimes with a single click.
-* **Category & Ticker Filters**: Filter on the fly with quick category buttons (`[All]`, `[SELL]`, `[HOLD]`, `[BUY]`, `[WATCH]`) and ticker checkboxes (limit 2–5).
-* **Instant Toggle**: Toggle the mini tracker via the `[◱ Mini]` tag button on the main wallpaper status bar or from the Edit Mode header.
+* **Translucent Dark Panel**: A compact, always-on-top floating companion matching the main widget palette (`#202020`/`#2D2D2D` dark cards with 92% opacity), freely draggable at any time with saved monitor-clamped position.
+* **Compact Single-Price View**: Shows `Symbol`, latest `Price`, directional arrow, and `% Change`, scrolling smoothly for larger watchlists.
+* **Dynamic Alert Pill**: The center header turns into an animated alert pill (`🔔` / `🚨`) showing the active alert count and letting you acknowledge active alerts and silence chimes with a single click.
+* **Category & Unlimited Ticker Checklist**: Filter on the fly with category pills (`ALL`, `SELL`, `HOLD`, `BUY`, `WATCH`) and an unlimited scrollable ticker checklist (empty selection shows all stocks).
+* **Header Mini Switch**: Toggle the Mini Tracker directly from the `Mini` pill switch on the far right of the main widget status bar or via the **Mini Tracker** button in Edit Mode.
+
+### 🕒 Extended Hours Market Support (`PH` / `RH` / `AH`)
+* **Separate Session Columns**: The main desktop HUD and Edit Mode display dedicated Pre-Market (`PH`), Regular Hours (`RH`), and After-Hours (`AH`) price columns alongside the latest directional change (`▲`/`▼` `%`). The currently active market session (`PRE`, `REGULAR`, `AFTER`) is highlighted in full color while inactive sessions dim cleanly.
+* **Yahoo Finance Supplementation**: When `extended_hours` is enabled in `Config` (on by default), Yahoo Finance extended-hours quotes (`preMarketPrice`, `postMarketPrice`, and 1-minute extended-session bars) supplement Finnhub quotes so `PH`, `RH`, and `AH` retain and display the last trading day's session prices across `CLOSED`, `PRE`, `REGULAR`, and `AFTER` (with live `PRE`/`AFTER`/`CLOSED` updates and 15-minute cached `PH`/`AH` backfill during `REGULAR`).
 
 ### 🚀 High-Frequency Finnhub Key Pool (15s Updates)
 * **4-Key Round-Robin Rotation**: Distributes quote fetches across up to 4 Finnhub free-tier keys, unlocking **15-second live updates** during regular market hours ($4 \times 48 = 192$ calls/min budget, safely within the 30-symbol allowance).
@@ -156,7 +160,7 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 | `run_stock_alert_widget.bat` | Starts the widget in the background via `pythonw.exe` (no console window). |
 | `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with simulated price swings through all zones. |
 | `run_stock_alert_widget.bat debug` | Starts in foreground console mode to display live logs and tracebacks. |
-| `run_stock_alert_widget.bat test` | Runs the full 280-test automated `pytest` suite. |
+| `run_stock_alert_widget.bat test` | Runs the full 297-test automated `pytest` suite. |
 | `run_stock_alert_widget.bat startup status` | Checks if the Windows Startup shortcut is configured. |
 | `run_stock_alert_widget.bat startup create` | Configures the widget to automatically launch on Windows login. |
 | `run_stock_alert_widget.bat startup remove` | Removes the Windows Startup shortcut. |
@@ -184,12 +188,11 @@ stock_alert_widget/
 │   ├── finnhub.py           # Multi-key pool rotation, in-slot failover, 429 backoff
 │   └── mock.py              # Demo/mock provider with scripted price trajectories
 └── ui/
-    ├── widget.py            # Canvas HUD view, sonar pulse animation, tooltips
-    ├── mini_tracker.py      # Floating always-on-top HUD with selective click-through
-    ├── editor.py            # Edit mode GUI, stock list, inline row expansion
-    ├── dialogs.py           # Add stock & custom alert creation dialogs
+    ├── widget.py            # Canvas HUD view, PH/RH/AH columns, sonar pulse animation, tooltips
+    ├── mini_tracker.py      # Floating always-on-top translucent dark companion HUD
+    ├── editor.py            # Edit mode GUI, stock list, inline row expansion & dialogs
     ├── popup.py             # Top-level desktop alert card
-    └── common.py            # Reusable Tk timer abstractions & UI helpers
+    └── common.py            # Shared dark palette, timer helpers & UI widgets
 ```
 
 ---
@@ -200,7 +203,7 @@ All runtime and persistent user data is kept isolated in `%APPDATA%\StockAlertWi
 
 | File | Purpose |
 |---|---|
-| `config.json` | General settings, look & feel tokens, fee structures, and zone defaults. |
+| `config.json` | General settings (`extended_hours`, polling), look & feel tokens, fee structures, and zone defaults. |
 | `watchlist.json` | Current stock watchlist, positions, and active alert rules. |
 | `watchlist.last_good.json` | Automatic fallback copy preserved across atomic writes. |
 | `state.json` | Runtime state, last seen prices, and daily close benchmarks. |
@@ -221,30 +224,32 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 249 items
+collected 297 items
 
-tests/test_app_core.py .......................                           [  9%]
-tests/test_config_multikey.py ..................                         [ 16%]
-tests/test_config_store.py ...................                           [ 24%]
-tests/test_data_checks.py .......                                        [ 26%]
-tests/test_desktop_layer_stub.py .........                               [ 30%]
-tests/test_engine.py .......................                             [ 39%]
-tests/test_finnhub_pool.py ...........................                   [ 50%]
-tests/test_finnhub_scheduler.py ...................                      [ 58%]
-tests/test_main_demo.py ........                                         [ 61%]
-tests/test_main_multikey.py .........                                    [ 65%]
-tests/test_market_clock.py ......                                        [ 67%]
-tests/test_market_clock_rules.py .......                                 [ 70%]
-tests/test_notifier.py ................                                  [ 76%]
-tests/test_pipeline.py .....                                             [ 78%]
-tests/test_positions.py .......                                          [ 81%]
-tests/test_privacy.py ......                                             [ 83%]
-tests/test_replay_soak.py ..                                             [ 84%]
-tests/test_startup_shortcut.py ..                                        [ 85%]
-tests/test_ui_smoke.py ....................                              [ 93%]
+tests/test_app_core.py .......................                           [  7%]
+tests/test_audit_and_extended_hours.py .....................             [ 14%]
+tests/test_config_multikey.py ..................                         [ 20%]
+tests/test_config_store.py ...................                           [ 27%]
+tests/test_data_checks.py .......                                        [ 29%]
+tests/test_desktop_layer_stub.py .........                               [ 32%]
+tests/test_engine.py .......................                             [ 40%]
+tests/test_finnhub_pool.py ...........................                   [ 49%]
+tests/test_finnhub_scheduler.py ...................                      [ 55%]
+tests/test_main_demo.py ........                                         [ 58%]
+tests/test_main_multikey.py .........                                    [ 61%]
+tests/test_market_clock.py ......                                        [ 63%]
+tests/test_market_clock_rules.py .......                                 [ 65%]
+tests/test_mini_tracker.py ...........................                   [ 75%]
+tests/test_notifier.py ................                                  [ 80%]
+tests/test_pipeline.py .....                                             [ 82%]
+tests/test_positions.py .......                                          [ 84%]
+tests/test_privacy.py ......                                             [ 86%]
+tests/test_replay_soak.py ..                                             [ 87%]
+tests/test_startup_shortcut.py ..                                        [ 87%]
+tests/test_ui_smoke.py ....................                              [ 94%]
 tests/test_zones.py ................                                     [100%]
 
-============================ 249 passed in 10.2s ==============================
+============================ 297 passed =======================================
 ```
 
 ---

@@ -58,12 +58,15 @@ def net_profit(shares, basis, price, rates: FeeRates = DEFAULT_RATES) -> Decimal
 
 def breakeven(shares, basis, rates: FeeRates = DEFAULT_RATES) -> Optional[Decimal]:
     """Lowest whole-cent price whose projected net profit is >= 0, else None."""
+    if rates.sell_rate >= Decimal("1"):
+        raise ValueError("sell_rate must be < 1")
     shares, basis = D(shares), D(basis)
     if shares <= 0 or basis <= 0:
         return None
-    p_min_fee = (basis + rates.sell_min - CENT) / shares
-    p_pct_fee = basis / (shares * (1 - rates.sell_rate)) - CENT
-    p = max(p_min_fee, p_pct_fee).quantize(CENT, rounding=ROUND_UP)
+    gross_min = basis + rates.sell_min
+    gross_pct = (basis / (Decimal("1") - rates.sell_rate)) if rates.sell_rate > 0 else basis
+    gross_needed = max(gross_min, gross_pct)
+    p = max(CENT, ((gross_needed - Decimal("0.005")) / shares).quantize(CENT, rounding=ROUND_UP))
     while net_profit(shares, basis, p, rates) < 0:
         p += CENT
     # Safety: the start value is meant to be a lower bound; make sure it is, so the

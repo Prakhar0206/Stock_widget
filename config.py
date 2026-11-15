@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from models import MODES, PRIORITIES
+from models import MODES, PRIORITIES, ValidationError
 from positions import FeeRates
+from zones import validate_thresholds
 
 IST = ZoneInfo("Asia/Kolkata")
 MAX_CALLS_PER_MIN = 48          # 80% of the 60/min free-tier limit, PER API KEY
@@ -74,12 +75,13 @@ class Config:
     toast: bool = True
     quiet_hours_ist: Optional[tuple] = None      # (start, end) as datetime.time
     hotkeys_enabled: bool = True
-    extended_hours: bool = False
+    extended_hours: bool = True
     zone_defaults: dict = field(default_factory=lambda: dict(ZONE_DEFAULTS_PCT))
     look: dict = field(default_factory=dict)     # desktop-layer look settings (Step B)
     # Finnhub keys from config.json (plaintext fallback; the environment wins). repr=False so a
     # logged Config can never print a key.
     api_keys: list = field(default_factory=list, repr=False)
+    num_keys: int = 1
 
 
 def _dec(v) -> Decimal:
@@ -172,8 +174,24 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
     if not (0 <= rates.buy_rate < 1 and 0 <= rates.sell_rate < 1 and rates.buy_min >= 0 and rates.sell_min >= 0):
         raise ValueError("fee rates/minimums out of range")
     zb = _obj(d, "zone_band")
+    band_standard = _dec(zb.get("standard", "0.5"))
+    band_noisy = _dec(zb.get("noisy", "1.0"))
+    if band_standard < 0:
+        raise ValueError("zone_band.standard must be >= 0")
+    if band_noisy < 0:
+        raise ValueError("zone_band.noisy must be >= 0")
+    rearm_band = _dec(d.get("level_rearm_band_pct", "0.5"))
+    if not (Decimal(0) <= rearm_band < Decimal(100)):
+        raise ValueError("level_rearm_band_pct must be between 0 and 100")
     zd = dict(ZONE_DEFAULTS_PCT)
     zd.update({k: _dec(v) for k, v in _obj(d, "zone_defaults").items() if k in zd})
+    try:
+        zd_dec = {k: _dec(v) for k, v in zd.items()}
+        zd_errs = validate_thresholds("SELL", zd_dec) + validate_thresholds("BUY", zd_dec)
+    except ValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    if zd_errs:
+        raise ValueError("zone_defaults invalid: " + " ".join(zd_errs))
     mode = d.get("level_alert_mode", "rearm")
     prio = d.get("default_priority", "MEDIUM")
     if mode not in MODES:
@@ -181,7 +199,7 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
     if prio not in PRIORITIES:
         raise ValueError("default_priority must be LOW, MEDIUM or HIGH")
     api_keys = _parse_api_keys(d.get("api_keys"))
-    num_keys = num_env_keys if num_env_keys > 0 else len(api_keys)
+    num_keys = max(1, num_env_keys if num_env_keys > 0 else max(1, len(api_keys)))
     default_poll = 15 if num_keys >= 4 else 60
     raw_poll = d.get("poll_seconds")
     if raw_poll is None or (raw_poll == 60 and num_keys >= 4):
@@ -192,15 +210,15 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
         poll_seconds=poll_s,
         stale_after_seconds=_int(d, "stale_after_seconds", 180),
         max_symbols=_int(d, "max_symbols", 30), rates=rates,
-        zone_band_standard=_dec(zb.get("standard", "0.5")), zone_band_noisy=_dec(zb.get("noisy", "1.0")),
-        level_rearm_band_pct=_dec(d.get("level_rearm_band_pct", "0.5")), level_alert_mode=mode,
+        zone_band_standard=band_standard, zone_band_noisy=band_noisy,
+        level_rearm_band_pct=rearm_band, level_alert_mode=mode,
         cooldown_min=_int(d, "cooldown_min", 30), default_priority=prio,
         pop_seconds=_int(d, "pop_seconds", 10), escalation_seconds=_int(d, "escalation_seconds", 120),
         sound=_bool(d, "sound", True), toast=_bool(d, "toast", True),
         quiet_hours_ist=_parse_quiet(d.get("quiet_hours_ist")),
-        hotkeys_enabled=_bool(d, "hotkeys_enabled", True), extended_hours=_bool(d, "extended_hours", False),
-        zone_defaults=zd, look=dict(_obj(d, "look")), api_keys=api_keys)
-    check_budget(cfg.max_symbols, cfg.poll_seconds, num_keys=num_keys)
+        hotkeys_enabled=_bool(d, "hotkeys_enabled", True), extended_hours=_bool(d, "extended_hours", True),
+        zone_defaults=zd, look=dict(_obj(d, "look")), api_keys=api_keys, num_keys=num_keys)
+    check_budget(cfg.max_symbols, cfg.poll_seconds, num_keys=cfg.num_keys)
     return cfg
 
 
@@ -208,14 +226,15 @@ def load_config(path: Path, num_env_keys: int = 0):
     """Returns (Config, warnings). Missing file -> defaults, no warning. Invalid -> defaults + warning.
     num_env_keys is passed through to parse_config (keys that come from the environment)."""
     path = Path(path)
-    default_poll = 15 if num_env_keys >= 4 else 60
+    num_keys = max(1, int(num_env_keys))
+    default_poll = 15 if num_keys >= 4 else 60
     if not path.exists():
-        return Config(poll_seconds=default_poll), []
+        return Config(poll_seconds=default_poll, num_keys=num_keys), []
     try:
         data = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal)
         return parse_config(data, num_env_keys=num_env_keys), []
     except Exception as exc:  # any problem: built-in defaults, shown on the widget
-        return Config(poll_seconds=default_poll), [f"config.json is invalid ({exc}); using built-in defaults."]
+        return Config(poll_seconds=default_poll, num_keys=num_keys), [f"config.json is invalid ({exc}); using built-in defaults."]
 
 
 def in_quiet_hours(cfg: Config, now_utc: datetime) -> bool:

@@ -186,8 +186,20 @@ def zone_price_table(defs: list, base) -> list:
     base = D(base)
     rows = []
     for d in defs:
-        lo_p = _ceil_cent(base * (1 + d.lo / 100)) if d.lo is not None else None
-        hi_p = _floor_cent(base * (1 + d.hi / 100)) if d.hi is not None else None
+        if d.lo is not None:
+            raw_lo = base * (1 + d.lo / 100)
+            lo_p = _ceil_cent(raw_lo)
+            if not d.lo_incl and lo_p == raw_lo:
+                lo_p += CENT
+        else:
+            lo_p = None
+        if d.hi is not None:
+            raw_hi = base * (1 + d.hi / 100)
+            hi_p = _floor_cent(raw_hi)
+            if not d.hi_incl and hi_p == raw_hi:
+                hi_p -= CENT
+        else:
+            hi_p = None
         rows.append({"name": d.name, "tag": d.tag, "lo_pct": d.lo, "hi_pct": d.hi,
                      "lo_price": lo_p, "hi_price": hi_p,
                      "priority": d.priority, "label": d.label, "enabled": d.enabled})

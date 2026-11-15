@@ -195,11 +195,24 @@ def test_pct_move_day(engine):
 
 
 def test_no_alerts_outside_regular_session(engine):
+    from config import Config
+    from engine import AlertEngine
+
+    # Default Config has extended_hours=True: PRE and AFTER are active; CLOSED suppresses alerts without mutating zones.
     s = aapl(alerts=[lvl("t", "level_above", price="205", mode="once")])
-    f = Feed(engine, s, session=Session.AFTER)
+    f = Feed(engine, s, session=Session.CLOSED)
     assert f.push("210") == [] and f.push("212") == []
-    f.session = Session.REGULAR
-    assert [e.alert_id for e in f.push("212")] == ["t"]         # armed + true at first regular reading
+    assert engine.sym_state("AAPL")["zone"] is None
+    f.session = Session.AFTER
+    assert [e.alert_id for e in f.push("212")] == ["t"]         # armed + true at first active reading
+
+    # With extended_hours=False, AFTER/PRE suppress alerts until REGULAR opens.
+    e_reg = AlertEngine(Config(extended_hours=False))
+    f2 = Feed(e_reg, aapl(alerts=[lvl("t", "level_above", price="205", mode="once")]), session=Session.AFTER)
+    assert f2.push("210") == [] and f2.push("212") == []
+    assert e_reg.sym_state("AAPL")["zone"] is None
+    f2.session = Session.REGULAR
+    assert [e.alert_id for e in f2.push("212")] == ["t"]
 
 
 def test_disabled_alert_stays_quiet_and_reenables(engine):

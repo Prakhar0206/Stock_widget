@@ -25,10 +25,13 @@ import re
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable, Optional
+from urllib.parse import quote
 
+from market_clock import ET
 from models import PriceTick
 from providers.base import (MalformedResponse, NetworkFailure, ProviderError, QuoteProvider,
                             RateLimited)
@@ -45,6 +48,26 @@ _KEY_SPLIT = re.compile(r"[,;\s]+")
 
 def _dec(v) -> Optional[Decimal]:
     return None if v is None else Decimal(str(v))
+
+
+def _pos_dec(v) -> Optional[Decimal]:
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        d = Decimal(str(v))
+    except Exception:
+        return None
+    return d if (d.is_finite() and d > 0) else None
+
+
+def _int_ts(v) -> Optional[int]:
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        t = int(v)
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    return t if t > 0 else None
 
 
 def normalize_keys(api_key) -> list:
@@ -75,9 +98,19 @@ class FinnhubProvider(QuoteProvider):
                  sleep_fn: Callable[[float], None] = time.sleep,
                  clock_fn: Callable[[], float] = time.monotonic,
                  internet_check_fn: Optional[Callable[[], bool]] = None):
+        self._uses_real_http = (session is None)
+        self.current_session: Optional[str] = None
+        self.key_source: str = "unknown"
+        self._yahoo_s = None
         if session is None:
             import requests
             session = requests.Session()
+            self._yahoo_s = requests.Session()
+            self._yahoo_s.headers.update({
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+                "Accept": "application/json",
+            })
         keys = normalize_keys(api_key)
         self._s = session
         headers = {"Accept": "application/json"}
@@ -112,6 +145,7 @@ class FinnhubProvider(QuoteProvider):
         self._offline: bool = False             # True when internet check or all-symbol network fails
         self._last_reject_code = 401
         self._notices: deque = deque(maxlen=20)
+        self._ext_regular_cache: dict[str, tuple[float, dict]] = {}
 
     def __repr__(self) -> str:                  # never include a key
         return f"<FinnhubProvider keys={len(self._keys)}>"
@@ -139,6 +173,7 @@ class FinnhubProvider(QuoteProvider):
             self._rejected_active.clear()
             self._notified_invalid_keys.clear()
             self._invalid_key_events.clear()
+            self._ext_regular_cache.clear()
         with self._lock:
             if keys:
                 self._s.headers[TOKEN_HEADER] = keys[0]
@@ -259,6 +294,7 @@ class FinnhubProvider(QuoteProvider):
         key = self._slots[idx]
         now = self._clock()
         with self._pool_lock:
+            self._offline = False
             strikes = self._rate_limit_strikes.get(key, 0) + 1
             self._rate_limit_strikes[key] = strikes
             cooldown = RATE_LIMIT_BACKOFFS_S[min(strikes - 1, len(RATE_LIMIT_BACKOFFS_S) - 1)]
@@ -280,6 +316,7 @@ class FinnhubProvider(QuoteProvider):
         now = self._clock()
         key_num = idx + 1
         with self._pool_lock:
+            self._offline = False
             self.rejected_until[key] = now + REJECTED_RETRY_S
             self._rejected_active.add(key)
             self.quarantined_until.pop(key, None)
@@ -299,6 +336,7 @@ class FinnhubProvider(QuoteProvider):
 
     def _on_server_error(self, idx: int, code: int) -> RateLimited:
         with self._pool_lock:
+            self._offline = False
             self._server_down = True
             if self._next == idx and len(self._slots) > 1:
                 self._next = (idx + 1) % len(self._slots)
@@ -414,6 +452,7 @@ class FinnhubProvider(QuoteProvider):
         tried_keys: set[int] = set()
         last_exc: Optional[Exception] = None
         net_failures = 0
+        consecutive_net_failures = 0
         last_net_exc: Optional[NetworkFailure] = None
 
         sym_idx = 0
@@ -428,16 +467,22 @@ class FinnhubProvider(QuoteProvider):
             try:
                 raw = self._request_with_key(current_key_idx, "/quote", {"symbol": sym})
                 key_had_success = True
-                ticks.append(self._parse_quote(sym, raw))
+                tick = self._parse_quote(sym, raw)
+                if self._uses_real_http and tick.price > 0:
+                    tick = self._apply_yahoo_extended(sym, tick)
+                ticks.append(tick)
+                consecutive_net_failures = 0
                 sym_idx += 1
             except MalformedResponse as exc:
                 # Bad payload for one symbol: discard, count, continue with the same key
+                consecutive_net_failures = 0
                 with self._count_lock:
                     self.bad_symbols += 1
                 log.warning("malformed quote for %s: %s", sym, exc)
                 sym_idx += 1
             except NetworkFailure as exc:
                 net_failures += 1
+                consecutive_net_failures += 1
                 last_net_exc = exc
                 with self._count_lock:
                     self.network_errors += 1
@@ -454,6 +499,11 @@ class FinnhubProvider(QuoteProvider):
                         raise
                     except Exception:
                         pass
+                if consecutive_net_failures >= 3:
+                    with self._pool_lock:
+                        self._offline = True
+                    exc.partial_ticks = list(ticks)
+                    raise exc
                 # Transient per-symbol timeout/connection error: skip symbol without blaming the key
                 sym_idx += 1
             except (RateLimited, ProviderError) as exc:
@@ -510,6 +560,168 @@ class FinnhubProvider(QuoteProvider):
                 ptime = None
         return PriceTick(sym, price, pc if pc else None, chg, pct, hi, lo, ptime, self._now(), "finnhub")
 
+    def _fetch_yahoo_extended(self, sym: str) -> Optional[dict]:
+        """Fetch pre/regular/after-hours prices for `sym` from Yahoo v8 chart endpoint
+        using the separate token-free session (never sends X-Finnhub-Token)."""
+        if not self._uses_real_http or self._yahoo_s is None:
+            return None
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(sym, safe='')}"
+        params = {"interval": "1m", "range": "1d", "includePrePost": "true"}
+        try:
+            r = self._yahoo_s.get(url, params=params, timeout=3.0)
+            if r.status_code != 200:
+                return None
+            data = json.loads(r.text, parse_float=Decimal)
+            result = (data.get("chart") or {}).get("result") or []
+            if not result:
+                return None
+            r0 = result[0]
+            meta = r0.get("meta") or {}
+        except Exception as exc:
+            log.debug("yahoo extended fetch failed for %s: %s", sym, type(exc).__name__)
+            return None
+
+        periods = meta.get("currentTradingPeriod") or {}
+        timestamps = r0.get("timestamp") or []
+        quote_list = (r0.get("indicators") or {}).get("quote") or []
+        closes = quote_list[0].get("close", []) if quote_list and isinstance(quote_list[0], dict) else []
+
+        def _bounds(key: str) -> tuple[Optional[int], Optional[int]]:
+            w = periods.get(key) if isinstance(periods, dict) else None
+            if not isinstance(w, dict):
+                return None, None
+            return _int_ts(w.get("start")), _int_ts(w.get("end"))
+
+        def _last_bar(key: str) -> tuple[Optional[Decimal], Optional[int]]:
+            start, end = _bounds(key)
+            best_p, best_t = None, None
+            if start is not None and end is not None:
+                for ts_raw, cl_raw in zip(timestamps, closes):
+                    ts = _int_ts(ts_raw)
+                    if ts is None or not (start <= ts <= end):
+                        continue
+                    p = _pos_dec(cl_raw)
+                    if p is not None:
+                        best_p, best_t = p, ts
+                if best_p is not None:
+                    return best_p, best_t
+
+            # Fallback when currentTradingPeriod bounds are on another date (e.g. weekend/holiday)
+            windows = {"pre": (240, 570), "regular": (570, 960), "post": (960, 1200)}
+            win = windows.get(key)
+            if not win:
+                return None, None
+            lo_m, hi_m = win
+            dated_bars: list[tuple[str, int, int, Decimal]] = []
+            for ts_raw, cl_raw in zip(timestamps, closes):
+                ts = _int_ts(ts_raw)
+                p = _pos_dec(cl_raw)
+                if ts is None or p is None:
+                    continue
+                dt_et = datetime.fromtimestamp(ts, timezone.utc).astimezone(ET)
+                hm = dt_et.hour * 60 + dt_et.minute
+                dated_bars.append((dt_et.strftime("%Y-%m-%d"), hm, ts, p))
+            if not dated_bars:
+                return None, None
+            latest_date = max(d for d, _, _, _ in dated_bars)
+            for d, hm, ts, p in dated_bars:
+                if d == latest_date and lo_m <= hm < hi_m:
+                    best_p, best_t = p, ts
+            return best_p, best_t
+
+        def _extract(price_key: str, time_key: str, period_key: str,
+                     allow_outside_window: bool = False) -> tuple[Optional[Decimal], Optional[int]]:
+            p = _pos_dec(meta.get(price_key))
+            ts = _int_ts(meta.get(time_key))
+            start, end = _bounds(period_key)
+            if p is not None:
+                if start is not None and end is not None and ts is not None:
+                    if start <= ts <= end or allow_outside_window:
+                        return p, ts
+                elif allow_outside_window or not (period_key == "post" and self.current_session == "PRE"):
+                    return p, ts
+            return _last_bar(period_key)
+
+        pre_price, pre_ts = _extract("preMarketPrice", "preMarketTime", "pre", allow_outside_window=True)
+        reg_price, reg_ts = _extract("regularMarketPrice", "regularMarketTime", "regular",
+                                     allow_outside_window=True)
+        ah_price, ah_ts = _extract("postMarketPrice", "postMarketTime", "post", allow_outside_window=True)
+        prev_close = _pos_dec(meta.get("chartPreviousClose")) or _pos_dec(meta.get("previousClose"))
+        return {
+            "pre_price": pre_price, "pre_ts": pre_ts,
+            "reg_price": reg_price, "reg_ts": reg_ts,
+            "ah_price": ah_price, "ah_ts": ah_ts,
+            "prev_close": prev_close,
+        }
+
+    def _apply_yahoo_extended(self, sym: str, tick: PriceTick) -> PriceTick:
+        """Overlay extended-hours prices onto `tick` without failing the Finnhub batch."""
+        sess = self.current_session
+        is_regular = sess in ("REGULAR", "OPEN")
+        ext = None
+        if is_regular:
+            cached = self._ext_regular_cache.get(sym)
+            if cached is not None and (self._clock() - cached[0]) < 900.0:
+                ext = cached[1]
+        if ext is None:
+            try:
+                ext = self._fetch_yahoo_extended(sym)
+            except Exception as exc:
+                log.debug("yahoo extended parse failed for %s: %s", sym, type(exc).__name__)
+                return tick
+            if ext and is_regular:
+                self._ext_regular_cache[sym] = (self._clock(), ext)
+        if not ext:
+            return tick
+
+        pre_price = ext["pre_price"]
+        reg_price = (tick.price if (is_regular or sess in ("AFTER", "CLOSED")) and tick.price > 0
+                     else (ext["reg_price"] or tick.price))
+        ah_price = ext["ah_price"]
+
+        if sess == "PRE":
+            live_price, live_ts = pre_price, ext["pre_ts"]
+        elif is_regular:
+            live_price, live_ts = None, None
+        elif sess == "AFTER":
+            live_price, live_ts = ah_price, ext["ah_ts"]
+        else:
+            live_price = ah_price or reg_price or pre_price
+            if ah_price:
+                live_ts = ext["ah_ts"]
+            elif ext["reg_price"]:
+                live_ts = ext["reg_ts"]
+            else:
+                live_ts = ext["pre_ts"]
+
+        pc = tick.prev_close or ext["prev_close"]
+        new_price = live_price if (live_price is not None and live_price > 0) else tick.price
+        chg, pct = tick.change, tick.change_pct
+        if live_price is not None and live_price > 0 and pc is not None and pc > 0:
+            chg = live_price - pc
+            pct = (chg / pc) * Decimal("100")
+        ptime = tick.provider_time
+        if live_ts:
+            try:
+                ptime = datetime.fromtimestamp(live_ts, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                pass
+        kwargs = {
+            "price": new_price,
+            "prev_close": pc,
+            "change": chg,
+            "change_pct": pct,
+            "provider_time": ptime,
+        }
+        if hasattr(tick, "pre_price"):
+            kwargs.update({
+                "pre_price": pre_price,
+                "reg_price": reg_price,
+                "ah_price": ah_price,
+                "session_kind": sess,
+            })
+        return replace(tick, **kwargs)
+
     def fetch_market_status(self) -> Optional[dict]:
         d = self._get("/stock/market-status", {"exchange": "US"})
         if not isinstance(d, dict) or "isOpen" not in d:
@@ -520,7 +732,10 @@ class FinnhubProvider(QuoteProvider):
     def close(self) -> None:
         """Close the HTTP session's socket pool. Safe to call twice or during shutdown; it does not
         take the request lock, so it never blocks the caller behind a request in flight."""
-        try:
-            self._s.close()
-        except Exception as exc:
-            log.info("session close failed: %s", type(exc).__name__)
+        for sess in (self._s, self._yahoo_s):
+            if sess is None:
+                continue
+            try:
+                sess.close()
+            except Exception as exc:
+                log.info("session close failed: %s", type(exc).__name__)

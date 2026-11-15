@@ -102,6 +102,12 @@ def forward_pool_notices(provider, warnings: list) -> None:
                 warnings.append(msg)
 
 
+def resolve_mutex_name(args) -> str:
+    return ("Local\\StockAlertWidget_SingleInstance_DEMO"
+            if getattr(args, "mock", False)
+            else "Local\\StockAlertWidget_SingleInstance")
+
+
 def build_runtime(args, environ=os.environ) -> Runtime:
     """Everything decided before any window exists (kept separate so it can be tested)."""
     from providers.finnhub import FinnhubProvider
@@ -109,22 +115,29 @@ def build_runtime(args, environ=os.environ) -> Runtime:
     from store import atomic_write_json
 
     folder = resolve_data_dir(args, environ)
+    mutex_name = resolve_mutex_name(args)
     env_keys = [] if args.mock else get_api_keys(environ)    # environment only; never logged or written
     cfg, warnings = load_config(folder / "config.json", num_env_keys=len(env_keys))
     if args.mock:
         if not (folder / "watchlist.json").exists():
             atomic_write_json(folder / "watchlist.json", DEMO_WATCHLIST)
-        return Runtime(replace(cfg, poll_seconds=DEMO_POLL_S), folder, DemoProvider(), True, Session.REGULAR,
-                       [DEMO_BANNER] + warnings, "Local\\StockAlertWidget_SingleInstance_DEMO", True)
+        provider = DemoProvider()
+        provider.key_source = "demo"
+        return Runtime(replace(cfg, poll_seconds=DEMO_POLL_S, num_keys=4), folder, provider, True, Session.REGULAR,
+                       [DEMO_BANNER] + warnings, mutex_name, True)
     keys = env_keys or list(cfg.api_keys)                    # env wins; config.json "api_keys" is the fallback
-    if keys:
+    redact_keys = list(dict.fromkeys(env_keys + list(cfg.api_keys)))
+    if redact_keys:
         from store import register_keys_for_redaction
-        register_keys_for_redaction(keys)
+        register_keys_for_redaction(redact_keys)
+    if keys:
+        cfg = replace(cfg, num_keys=max(1, len(keys)))
         if len(keys) >= 4 and cfg.poll_seconds == 60:
             cfg = replace(cfg, poll_seconds=15)
         cfg, warnings = enforce_budget(cfg, folder, len(keys), warnings)
     provider = FinnhubProvider(keys) if keys else MockProvider({})
-    return Runtime(cfg, folder, provider, bool(keys), None, warnings, "Local\\StockAlertWidget_SingleInstance", False,
+    provider.key_source = "environment" if env_keys else ("config.json" if cfg.api_keys else "none")
+    return Runtime(cfg, folder, provider, bool(keys), None, warnings, mutex_name, False,
                    len(keys))
 
 
@@ -182,12 +195,12 @@ def run(argv=None) -> None:
     from market_clock import utcnow
 
     dl.set_dpi_aware()
-    rt = build_runtime(args)
-    raw_mutex = dl.single_instance(rt.mutex_name)
+    folder = resolve_data_dir(args)
+    raw_mutex = dl.single_instance(resolve_mutex_name(args))
     if raw_mutex is None:
         return                                  # a second copy exits silently
     res = {"mutex": MutexGuard(raw_mutex), "sched": None, "layer": None, "ctrl": None, "root": None,
-           "provider": rt.provider, "done": False}
+           "provider": None, "done": False}
 
     def step(label, fn):                        # one failing teardown step must not skip the rest
         try:
@@ -214,9 +227,15 @@ def run(argv=None) -> None:
         step("mutex", res["mutex"].close)
 
     try:
-        setup_logging(rt.folder)
+        setup_logging(folder)
+        rt = build_runtime(args)
+        res["provider"] = rt.provider
         cfg = rt.cfg
         store = Store(rt.folder)
+        try:
+            store.prune_alert_log(archive=True)
+        except Exception:
+            log.exception("alert log prune failed")
 
         root = tk.Tk()
         res["root"] = root
@@ -241,6 +260,12 @@ def run(argv=None) -> None:
 
         view = WidgetView(root, ctrl, layer, cfg.look, request_quit=quit_app)
         holder["view"] = view
+
+        def _on_notifier_change():
+            if not res["done"]:
+                root.after(0, view._refresh_mini)
+
+        notifier.add_listener(_on_notifier_change)
         w, h = view.render()
         layer.attach(w, h, hook=cfg.hotkeys_enabled)
         if cfg.hotkeys_enabled:
@@ -254,7 +279,7 @@ def run(argv=None) -> None:
         if rt.polling:
             sched.start()
 
-        last_beat = [time.time()]
+        last_beat = [time.monotonic()]
 
         def rearm(ms, fn):                          # a failed tick must never end its own timer chain
             if not res["done"]:
@@ -282,6 +307,14 @@ def run(argv=None) -> None:
             try:
                 if not q.empty():
                     ctrl.drain(q)
+                    if rt.session_override is None:
+                        st = ctrl.provider_status
+                        if (st and ctrl.provider_status_at
+                                and (utcnow() - ctrl.provider_status_at).total_seconds() < 1800
+                                and st.get("holiday")):
+                            sched.provider_session = Session.CLOSED
+                        else:
+                            sched.provider_session = None
                     view.refresh()
             except Exception:
                 log.exception("drain failure")
@@ -289,7 +322,7 @@ def run(argv=None) -> None:
 
         def housekeeping():
             try:
-                now = time.time()
+                now = time.monotonic()
                 if layer.wake_pending or now - last_beat[0] > WAKE_GAP_S:
                     layer.wake_pending = False
                     ctrl.on_wake(utcnow())
@@ -299,7 +332,7 @@ def run(argv=None) -> None:
                 view.refresh()
             except Exception:
                 log.exception("housekeeping failure")
-                last_beat[0] = time.time()
+                last_beat[0] = time.monotonic()
             rearm(HOUSEKEEP_MS, housekeeping)
 
         pump()

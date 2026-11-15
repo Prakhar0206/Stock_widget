@@ -195,6 +195,19 @@ class MarketCalendar:
                 return w[0]
         return None
 
+    def next_session_open(self, when: datetime, extended_hours: bool = True) -> Optional[datetime]:
+        """The first active session open strictly after `when` (aware ET), or None."""
+        if not extended_hours:
+            return self.next_regular_open(when)
+        et = when.astimezone(ET)
+        for i in range(_SEARCH_DAYS):
+            d = et.date() + timedelta(days=i)
+            if self.is_trading_day(d):
+                open_dt = datetime.combine(d, PRE_START_T, ET)
+                if open_dt > et:
+                    return open_dt
+        return None
+
     def next_close(self, when: datetime) -> Optional[datetime]:
         """The first regular close strictly after `when` (aware ET), or None."""
         et = when.astimezone(ET)
@@ -212,6 +225,13 @@ class MarketCalendar:
             if w and w[1] <= et:
                 return w[1]
         return None
+
+
+def is_active_session(session: Session, extended_hours: bool = True) -> bool:
+    """Whether alerts and feed staleness treat `session` as an active session."""
+    if extended_hours:
+        return session in (Session.PRE, Session.REGULAR, Session.AFTER)
+    return session == Session.REGULAR
 
 
 def fmt_ist(when: datetime) -> str:

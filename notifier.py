@@ -98,7 +98,26 @@ class Notifier:
         self.cfg, self.b, self.t, self.now_fn = cfg, backends, timers, now_fn
         self.muted = False
         self._latest: Optional[dict] = None      # the most recent alert, for Alt+A
+        self._pending_high: Optional[dict] = None
+        self._listeners: list = []
         self._beep_h = self._end_h = self._esc_h = None
+
+    def add_listener(self, fn: Callable[[], None]) -> None:
+        if fn not in self._listeners:
+            self._listeners.append(fn)
+
+    def remove_listener(self, fn: Callable[[], None]) -> None:
+        try:
+            self._listeners.remove(fn)
+        except ValueError:
+            pass
+
+    def _notify_listeners(self) -> None:
+        for fn in list(self._listeners):
+            try:
+                fn()
+            except Exception:
+                log.exception("notifier listener failed")
 
     # ---- public ----------------------------------------------------------------------------
     def toggle_mute(self) -> bool:
@@ -109,16 +128,50 @@ class Notifier:
             self._stop_beep()
         return self.muted
 
-    def notify(self, note) -> None:
+    def notify(self, note, now: Optional[datetime] = None) -> None:
         """`note` is an engine Notification (events already ordered by priority)."""
-        now = self.now_fn()
-        for ev in note.events:                       # every symbol's row flashes for 2 s
-            self.b.flash(ev.symbol, FLASH_MS)
+        if now is None:
+            now = self.now_fn()
         prio = note.priority
         if prio == "LOW":
+            for ev in note.events:                   # every symbol's row flashes for 2 s
+                self.b.flash(ev.symbol, FLASH_MS)
             return
         text = format_notification(note, now)
-        self._latest = {"text": text, "priority": prio, "acked": False, "escalated": False}
+        prev = self._latest
+        unacked_prev = bool(prev and not prev.get("acked"))
+        new_count = len(note.events)
+        if unacked_prev and prev.get("priority") == "HIGH" and prio != "HIGH":
+            total_count = prev.get("count", 1) + new_count
+            self._latest = {
+                "text": text,
+                "priority": "HIGH",
+                "acked": False,
+                "escalated": prev.get("escalated", False),
+                "count": total_count,
+            }
+            if self._pending_high is None:
+                self._pending_high = prev
+        else:
+            total_count = (prev.get("count", 1) + new_count) if unacked_prev else new_count
+            self._latest = {
+                "text": text,
+                "priority": prio,
+                "acked": False,
+                "escalated": False,
+                "count": total_count,
+            }
+            if prio == "HIGH":
+                if self._pending_high is not None and self._pending_high is not prev:
+                    self._pending_high["acked"] = True
+                self._pending_high = self._latest
+            else:
+                self._pending_high = None
+
+        for ev in note.events:                       # every symbol's row flashes for 2 s
+            self.b.flash(ev.symbol, FLASH_MS)
+        self._notify_listeners()
+
         quiet = self.muted or in_quiet_hours(self.cfg, now) or not self.cfg.sound
         if self.cfg.toast and not self.muted:
             self.b.toast(text, stay=(prio == "HIGH"), silent=True)
@@ -130,14 +183,23 @@ class Notifier:
 
     def acknowledge_latest(self) -> bool:
         cur = self._latest
-        if not cur or cur["acked"]:
+        pending = self._pending_high
+        if (not cur or cur.get("acked")) and (not pending or pending.get("acked")):
             return False
-        cur["acked"] = True
+        if cur:
+            cur["acked"] = True
+        if pending:
+            pending["acked"] = True
+        self._pending_high = None
         self._stop_sound()
         self.b.popup_close()
         if self._esc_h is not None:
             self.t.cancel(self._esc_h)
             self._esc_h = None
+        if getattr(self, "_esc_m", None) is not None:
+            self.t.cancel(self._esc_m)
+            self._esc_m = None
+        self._notify_listeners()
         return True
 
     # ---- HIGH ------------------------------------------------------------------------------
@@ -181,4 +243,6 @@ class Notifier:
         if cur["acked"]:
             return
         cur["escalated"] = True                      # repeats once, even while muted (silently)
+        if self._latest is not None and not self._latest.get("acked"):
+            self._latest["escalated"] = True
         self._show_high(cur, self.muted or in_quiet_hours(self.cfg, self.now_fn()) or not self.cfg.sound)

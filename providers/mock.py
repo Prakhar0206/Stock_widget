@@ -126,12 +126,17 @@ class DemoProvider(QuoteProvider):
             if sym == "NOPE":
                 price = Decimal(0)
                 base = None
+                pre_price = reg_price = ah_price = None
             else:
                 base_f, amp, period, phase = self._spec(sym)
                 base = Decimal(str(round(base_f, 2)))
                 price = Decimal(str(round(base_f * (1 + amp / 100 * math.sin(2 * math.pi * t / period + phase)), 2)))
+                pre_price = Decimal(str(round(base_f * 0.996, 2)))
+                reg_price = price
+                ah_price = Decimal(str(round(base_f * 1.003, 2)))
             chg = None if base is None else price - base
             pct = None if base is None else chg / base * 100
             ticks.append(PriceTick(sym, price, base, chg, pct, None, None,
-                                   now - timedelta(seconds=1), now, "mock"))
+                                   now - timedelta(seconds=1), now, "mock",
+                                   pre_price=pre_price, reg_price=reg_price, ah_price=ah_price))
         return ticks

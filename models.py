@@ -13,7 +13,6 @@ PRIORITY_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 ALERT_TYPES = ("level_above", "level_below", "zone_exit",
                "cross_above", "cross_below", "pct_move_day")
 LEVEL_TYPES = ("level_above", "level_below")
-EDITOR_TYPES = ("level_above", "level_below", "zone_exit")  # what the v1 editor may create
 MODES = ("once", "rearm", "repeat")
 
 # alert states (stored in state.json)
@@ -87,6 +86,10 @@ class PriceTick:
     provider_time: Optional[datetime]   # aware UTC, time of last trade
     fetched_at: datetime                # aware UTC
     source: str
+    pre_price: Optional[Decimal] = None
+    reg_price: Optional[Decimal] = None
+    ah_price: Optional[Decimal] = None
+    session_kind: Optional[str] = None
 
     def age_seconds(self, now: datetime) -> int:
         ref = self.provider_time or self.fetched_at

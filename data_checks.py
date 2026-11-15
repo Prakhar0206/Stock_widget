@@ -22,7 +22,7 @@ class PriceFilter:
         return self.suspicious is not None
 
     def submit(self, price: Optional[Decimal]) -> str:
-        if price is None or price <= 0:
+        if price is None or not isinstance(price, Decimal) or not price.is_finite() or price <= 0:
             return IGNORED
         if self.last_trusted is None:
             self.last_trusted = price

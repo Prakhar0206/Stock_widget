@@ -12,10 +12,15 @@ from typing import Callable, Optional
 from market_clock import IST
 from models import Alert, CATEGORIES, LABELS, MODES, PRIORITIES, PlannedEntry, Position, StockConfig, ValidationError
 from positions import position_summary, price_from_pct, pct_from_price, q2, stock_base
-from ui.common import (ACCENT, BG, BG2, FG, GREEN, MUTED, RED, button, check, entry, fmt_pct, label, menu,
+from ui.common import (ACCENT, AMBER, BG, BG2, FG, GREEN, MUTED, RED, button, check, entry, fmt_pct, label, menu,
                        parse_dec)
-from watchlist import parse_alert
+from watchlist import ZONE_NAMES_BY_CAT, parse_alert
 from zones import ZONE_DEFAULTS, TAGS, editor_rows
+
+try:
+    from desktop_layer import work_area_for_point
+except ImportError:
+    work_area_for_point = None
 
 LEVEL_CHOICES = {"Price at or above": "level_above", "Price at or below": "level_below", "Leaves a zone": "zone_exit"}
 
@@ -73,6 +78,43 @@ def new_alert_id(symbol: str) -> str:
     return f"{symbol.lower()}-{uuid.uuid4().hex[:6]}"
 
 
+def place_near_widget(win: tk.Toplevel, anchor: tk.Misc) -> None:
+    """Position `win` centered near `anchor` and clamped inside `anchor`'s monitor work area."""
+    win.update_idletasks()
+    w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+    try:
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    except Exception:
+        sw, sh = 1920, 1080
+    l, t, r, b = 0, 0, sw, sh
+    ax = ay = aw = ah = 0
+    anchor_ok = False
+    if anchor is not None:
+        try:
+            ax, ay = int(anchor.winfo_rootx()), int(anchor.winfo_rooty())
+            aw, ah = int(anchor.winfo_width()), int(anchor.winfo_height())
+            anchor_ok = True
+        except Exception:
+            anchor_ok = False
+    if work_area_for_point is not None:
+        try:
+            px, py = (ax + aw // 2, ay + ah // 2) if anchor_ok else (0, 0)
+            wl, wt, wr, wb = work_area_for_point(px, py)
+            if wr > wl and wb > wt:
+                l, t, r, b = wl, wt, wr, wb
+        except Exception:
+            pass
+    if anchor_ok and aw > 1 and ah > 1 and (ax, ay) != (0, 0):
+        x = ax + (aw - w) // 2
+        y = ay + (ah - h) // 2
+    else:
+        x = l + (r - l - w) // 2
+        y = t + (b - t - h) // 2
+    x = max(l, min(x, r - w))
+    y = max(t, min(y, b - h))
+    win.geometry(f"+{x}+{y}")
+
+
 class ChoiceDialog(tk.Toplevel):
     """'current 201.90, this would fire now' with Fire now / Wait for next cross."""
 
@@ -89,9 +131,12 @@ class ChoiceDialog(tk.Toplevel):
         button(row, "Cancel", lambda: self._finish(None)).pack(side="left", padx=4)
         self.protocol("WM_DELETE_WINDOW", lambda: self._finish(None))
         self.bind("<Escape>", lambda e: self._finish(None))
+        place_near_widget(self, master)
         self.grab_set()
 
     def _finish(self, choice):
+        if not self.winfo_exists():
+            return
         if not self._done:
             self._done = True
             self.destroy()
@@ -177,6 +222,7 @@ class AlertDialog(tk.Toplevel):
         button(row, "Cancel", self.destroy).pack(side="left", padx=4)
         self.bind("<Escape>", lambda e: self.destroy())
         self._layout()
+        place_near_widget(self, master)
 
     def _is_zone(self):
         return LEVEL_CHOICES[self.v_type.get()] == "zone_exit"
@@ -249,6 +295,8 @@ class AlertDialog(tk.Toplevel):
             self._finish(alert, None)
 
     def _finish(self, alert, choice):
+        if not self.winfo_exists():
+            return
         if alert is not None and choice is None and alert.enabled and self.ctx["price"] is not None \
                 and self.ctx["engine"].would_fire_now(self._probe(alert), alert, self.ctx["price"]):
             return                                   # the choice dialog was cancelled: stay open
@@ -272,10 +320,41 @@ class StockEditor(tk.Frame):
         self.choices: dict = {}
         self._zv: dict = {}
         self._zlabels: dict = {}
+        self.lbl_hysteresis: Optional[tk.Label] = None
+        self._alert_dlg: Optional[AlertDialog] = None
+        self._saved_job: Optional[str] = None
         self._load(ctrl.stock(symbol))
+
+    def _cancel_saved_timer(self):
+        if self._saved_job is not None:
+            try:
+                self.after_cancel(self._saved_job)
+            except tk.TclError:
+                pass
+            self._saved_job = None
+
+    def _clear_saved(self):
+        self._saved_job = None
+        if self.winfo_exists() and hasattr(self, "err") and self.err.winfo_exists():
+            self.err.config(text="", fg=RED)
+
+    def _close_alert_dlg(self):
+        if self._alert_dlg is not None and self._alert_dlg.winfo_exists():
+            try:
+                self._alert_dlg.destroy()
+            except tk.TclError:
+                pass
+        self._alert_dlg = None
+
+    def destroy(self):
+        self._cancel_saved_timer()
+        self._close_alert_dlg()
+        super().destroy()
 
     # ---- state <-> fields -------------------------------------------------------------------
     def _load(self, stock: StockConfig):
+        self._cancel_saved_timer()
+        self._close_alert_dlg()
         self.stock = copy.deepcopy(stock)
         s = self.stock
         self.v_cat = tk.StringVar(value=s.category)
@@ -290,6 +369,46 @@ class StockEditor(tk.Frame):
         self._zv = {}
         self.choices = {}
         self._build()
+        self._clean_snapshot = self._snapshot()
+
+    def _snapshot(self) -> tuple:
+        return (
+            self.v_cat.get(),
+            self.v_nick.get().strip(),
+            bool(self.v_noisy.get()),
+            self.v_shares.get().strip(),
+            self.v_avg.get().strip(),
+            self.v_fee.get().strip(),
+            self.v_ep.get().strip(),
+            self.v_es.get().strip(),
+            tuple(sorted(
+                (k, bool(v["on"].get()), v["prio"].get(), v["pct"].get().strip())
+                for k, v in self._zv.items()
+            )),
+            tuple(
+                (a.id, a.type, a.label, a.priority, a.mode, a.cooldown_min,
+                 a.price, a.pct, a.zone, a.enabled, a.note)
+                for a in self.stock.alerts
+            ),
+        )
+
+    def is_dirty(self) -> bool:
+        if not self.winfo_exists() or not hasattr(self, "_clean_snapshot"):
+            return False
+        try:
+            return bool(self.choices) or (self._snapshot() != self._clean_snapshot)
+        except tk.TclError:
+            return False
+
+    @staticmethod
+    def _compatible_alerts(alerts: list[Alert], cat: str) -> list[Alert]:
+        """Keep only alerts valid under `cat` (drops foreign zone_exit / percent levels on switch)."""
+        valid_zones = ZONE_NAMES_BY_CAT.get(cat, ())
+        return [
+            a for a in alerts
+            if (a.type != "zone_exit" or a.zone in valid_zones)
+            and not (cat == "WATCH" and a.pct is not None and a.type != "pct_move_day")
+        ]
 
     def _collect(self) -> StockConfig:
         cat = self.v_cat.get()
@@ -312,7 +431,8 @@ class StockEditor(tk.Frame):
                 ent = PlannedEntry(parse_dec(self.v_ep.get(), "x"), parse_dec(self.v_es.get(), "x", blank_ok=True))
             except ValidationError:
                 pass
-        st = StockConfig(old.symbol, cat, self.v_nick.get().strip(), self.v_noisy.get(), pos, ent, {}, old.alerts)
+        alerts = self._compatible_alerts(old.alerts, cat)
+        st = StockConfig(old.symbol, cat, self.v_nick.get().strip(), self.v_noisy.get(), pos, ent, {}, alerts)
         st.zones = self._collect_zones(st)
         return st
 
@@ -356,7 +476,7 @@ class StockEditor(tk.Frame):
         menu(top, self.v_cat, CATEGORIES, self._on_category, width=7).pack(side="left", padx=(6, 12))
         label(top, "Nickname").pack(side="left")
         entry(top, self.v_nick, 14).pack(side="left", padx=(6, 12))
-        check(top, "Noisy stock (wider bands, 2-reading confirm)", self.v_noisy).pack(side="left")
+        check(top, "Noisy stock (wider bands, 2-reading confirm)", self.v_noisy, self._update_live).pack(side="left")
 
         if cat in ("HOLD", "SELL"):
             f = tk.Frame(self, bg=BG)
@@ -379,8 +499,11 @@ class StockEditor(tk.Frame):
         self.lbl_info.pack(fill="x", pady=2, **pad)
 
         self._zlabels = {}
+        self.lbl_hysteresis = None
         if cat != "WATCH":
             label(self, "Zones", bold=True).pack(fill="x", pady=(8, 2), **pad)
+            self.lbl_hysteresis = label(self, "", fg=MUTED, justify="left", wraplength=640)
+            self.lbl_hysteresis.pack(fill="x", pady=(0, 2), **pad)
             self._zone_grid = tk.Frame(self, bg=BG)
             self._zone_grid.pack(fill="x", **pad)
             self._build_zones()
@@ -439,7 +562,7 @@ class StockEditor(tk.Frame):
         for w in f.winfo_children():
             w.destroy()
         base = stock_base(self._temp_stock() or self.stock, self.cfg.rates)
-        for a in self.stock.alerts:
+        for a in self._compatible_alerts(self.stock.alerts, self.v_cat.get()):
             row = tk.Frame(f, bg=BG)
             row.pack(fill="x", pady=1)
             var = tk.BooleanVar(value=a.enabled)
@@ -451,6 +574,7 @@ class StockEditor(tk.Frame):
 
     # ---- actions ----------------------------------------------------------------------------------
     def _on_category(self, *_):
+        self._close_alert_dlg()
         self._build()
 
     def _context(self) -> dict:
@@ -468,7 +592,15 @@ class StockEditor(tk.Frame):
                 "price": None if tick is None else tick.price, "zone_options": zopts, "engine": self.ctrl.engine}
 
     def _open_alert(self, alert: Optional[Alert]):
+        if self._alert_dlg is not None and self._alert_dlg.winfo_exists():
+            self._alert_dlg.lift()
+            self._alert_dlg.focus_force()
+            return
+
         def done(new: Alert, choice):
+            self._alert_dlg = None
+            if not self.winfo_exists():
+                return
             if alert is not None:
                 self.stock.alerts = [new if x.id == alert.id else x for x in self.stock.alerts]
             else:
@@ -477,7 +609,8 @@ class StockEditor(tk.Frame):
                 self.choices[new.id] = choice
             self._build_alerts()
             self.on_resize()
-        AlertDialog(self.winfo_toplevel(), self._context(), alert, done)
+
+        self._alert_dlg = AlertDialog(self.winfo_toplevel(), self._context(), alert, done)
 
     def _delete_alert(self, alert: Alert):
         self.stock.alerts = [a for a in self.stock.alerts if a.id != alert.id]
@@ -485,30 +618,32 @@ class StockEditor(tk.Frame):
         self.on_resize()
 
     def _save(self):
+        self._cancel_saved_timer()
         try:
             new = self._collect()
             self.ctrl.update_stock(new, self.choices)
         except ValidationError as exc:
-            self.err.config(text=str(exc))
+            self.err.config(text=str(exc), fg=RED)
             return
         except OSError:
-            self.err.config(text="Could not save the file. Nothing was written.")
+            self.err.config(text="Could not save the file. Nothing was written.", fg=RED)
             return
         except ArithmeticError:
-            self.err.config(text="Check the numbers you entered.")
+            self.err.config(text="Check the numbers you entered.", fg=RED)
             return
         self._load(self.ctrl.stock(self.symbol))
         self.err.config(text="Saved.", fg=GREEN)
-        self.after(1500, lambda: self.err.winfo_exists() and self.err.config(text="", fg=RED))
+        self._saved_job = self.after(1500, self._clear_saved)
 
     def _remove(self):
+        self._cancel_saved_timer()
         msg = (f"Remove {self.symbol}?\n\nThis deletes its position and alerts from the watchlist. "
                "Realized profit is not saved in v1.")
         if messagebox.askyesno("Remove stock", msg, parent=self.winfo_toplevel(), icon="warning"):
             try:
                 self.ctrl.remove_stock(self.symbol)
             except (ValidationError, OSError) as exc:
-                self.err.config(text=str(exc) or "Could not save the file. Nothing was written.")
+                self.err.config(text=str(exc) or "Could not save the file. Nothing was written.", fg=RED)
                 return
             self.on_removed()
 
@@ -527,6 +662,14 @@ class StockEditor(tk.Frame):
         elif st is not None and st.category == "BUY" and st.planned_entry:
             info = f"Planned entry {st.planned_entry.price:.2f}"
         self.lbl_info.config(text=info)
+        if self.lbl_hysteresis is not None and self.lbl_hysteresis.winfo_exists():
+            std = self.cfg.zone_band_standard
+            noisy_band = self.cfg.zone_band_noisy
+            band = noisy_band if self.v_noisy.get() else std
+            self.lbl_hysteresis.config(
+                text=(f"Exit hysteresis band: \u00b1{band}% active (standard \u00b1{std}%, "
+                      f"noisy \u00b1{noisy_band}%) \u2014 zone stays active until price moves past boundary by \u00b1{band}%.")
+            )
         if st is not None and self._zlabels:
             rows = editor_rows(st, self.cfg.zone_defaults, stock_base(st, self.cfg.rates))
             for r in rows:
@@ -545,7 +688,19 @@ class StockEditor(tk.Frame):
         now = self.now_fn()
         pt = t.provider_time.astimezone(IST).strftime("%H:%M:%S IST") if t.provider_time else "n/a"
         age = int((now - (row.last_ok or t.fetched_at)).total_seconds())
-        self.lbl_live.config(text=f"Current price {t.price:.2f} · provider time {pt} · data age {age} s · source {t.source}")
+        ph = rh = ah = "—"
+        try:
+            rv = next((r for r in self.ctrl.row_views(now) if r.symbol == self.symbol), None)
+        except Exception:
+            rv = None
+        if rv is not None:
+            ph = getattr(rv, "ph_price_text", "—")
+            rh = getattr(rv, "rh_price_text", "—")
+            ah = getattr(rv, "ah_price_text", "—")
+        self.lbl_live.config(
+            text=(f"Current price {t.price:.2f} · PH {ph} · RH {rh} · AH {ah} · "
+                  f"provider time {pt} · data age {age} s · source {t.source}")
+        )
 
 
 class AddStockDialog(tk.Toplevel):
@@ -604,6 +759,8 @@ class AddStockDialog(tk.Toplevel):
         self.bind("<Escape>", lambda ev: self.destroy())
         self.bind("<Destroy>", self._on_destroy)
         self._layout()
+        if not self._closed:
+            place_near_widget(self, master)
         e.focus_set()
 
     def _on_destroy(self, ev):
@@ -631,7 +788,9 @@ class AddStockDialog(tk.Toplevel):
         self.ctrl.check_symbol(sym, lambda tick, exc, sym=sym: self._checked_cb(sym, tick, exc))
 
     def _checked_cb(self, sym, tick, exc):
-        if self._closed:
+        if self._closed or not self.winfo_exists():
+            return
+        if self.v_sym.get().strip().upper() != sym:
             return
         if exc is not None:
             msg = str(exc) if isinstance(exc, ValidationError) else "Could not check the ticker right now (feed problem)."
@@ -646,6 +805,8 @@ class AddStockDialog(tk.Toplevel):
             self.v_ep.set(f"{tick.price:.2f}")
 
     def _add(self):
+        if self._closed or not self.winfo_exists():
+            return
         sym = self.v_sym.get().strip().upper()
         if self._checked != sym:
             self.err.config(text="Check the ticker first.")
@@ -669,5 +830,88 @@ class AddStockDialog(tk.Toplevel):
         except ArithmeticError:
             self.err.config(text="Check the numbers you entered.")
             return
+        self._closed = True
         self.destroy()
         self.on_added(sym)
+
+
+_KEY_SOURCE_LABELS = {
+    "environment": "Environment variables",
+    "config.json": "config.json",
+    "demo": "Demo mode",
+    "none": "Not configured",
+}
+
+
+class ApiKeysStatusDialog(tk.Toplevel):
+    """Read-only dialog displaying Finnhub API key count, source, and per-key pool health."""
+
+    def __init__(self, master, ctrl):
+        super().__init__(master, bg=BG)
+        self.overrideredirect(False)
+        self.title("API Keys & Status")
+        self.attributes("-topmost", True)
+        self.ctrl = ctrl
+        info = ctrl.key_pool_info() if hasattr(ctrl, "key_pool_info") else {}
+        self.info = info = dict(info or {})
+
+        keys = list(info.get("keys") or [])
+        total = int(info.get("total", len(keys)))
+        ok = int(info.get("ok", 0))
+        rate_limited = int(info.get("rate_limited", 0))
+        rejected = int(info.get("rejected", 0))
+        reject_code = info.get("reject_code", 401)
+        source_raw = str(info.get("source") or "none")
+        if source_raw in _KEY_SOURCE_LABELS:
+            source_text = _KEY_SOURCE_LABELS[source_raw]
+        elif source_raw == "unknown":
+            source_text = "Not configured" if total == 0 else "Unknown"
+        else:
+            source_text = source_raw
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True, padx=16, pady=12)
+
+        label(body, f"Configured keys: {total}", bold=True).pack(anchor="w")
+        label(body, f"Source: {source_text}", fg=MUTED).pack(anchor="w", pady=(2, 8))
+
+        if total == 0:
+            summary_text = ("No Finnhub API keys configured (Demo mode)"
+                            if source_raw == "demo" else "No Finnhub API keys configured")
+            summary_fg = AMBER if source_raw == "demo" else RED
+        elif ok == total and rate_limited == 0 and rejected == 0:
+            summary_text = f"All {total} key(s) healthy & working"
+            summary_fg = GREEN
+        else:
+            summary_text = f"{ok} working, {rate_limited} rate-limited, {rejected} rejected"
+            summary_fg = RED if rejected > 0 else AMBER
+
+        label(body, summary_text, fg=summary_fg, bold=True, wraplength=420, justify="left").pack(anchor="w", pady=(0, 8))
+
+        if keys:
+            box = tk.Frame(body, bg=BG2, padx=10, pady=8, highlightthickness=1, highlightbackground="#444444")
+            box.pack(fill="x", pady=(0, 8))
+            for idx, k in enumerate(keys):
+                num = k.get("num", idx + 1)
+                state = k.get("state", "ok")
+                retry_s = float(k.get("retry_in_s", 0.0) or 0.0)
+                calls = int(k.get("calls", 0) or 0)
+                if state == "ok":
+                    st_text, st_fg = "Healthy / working", GREEN
+                elif state == "rate_limited":
+                    st_text, st_fg = f"Rate-limited (retry in {retry_s:.0f}s)", AMBER
+                elif state == "rejected":
+                    st_text, st_fg = f"Rejected (HTTP {reject_code})", RED
+                else:
+                    st_text, st_fg = str(state), MUTED
+                label(box, f"Key #{num}", bg=BG2, bold=True).grid(row=idx, column=0, sticky="w", padx=(0, 12), pady=2)
+                label(box, st_text, bg=BG2, fg=st_fg).grid(row=idx, column=1, sticky="w", padx=(0, 12), pady=2)
+                label(box, f"Calls: {calls}", bg=BG2, fg=MUTED).grid(row=idx, column=2, sticky="e", pady=2)
+            box.grid_columnconfigure(1, weight=1)
+
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=16, pady=(0, 12))
+        button(bar, "Close", self.destroy).pack(side="right")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        place_near_widget(self, master)
+        self.focus_set()

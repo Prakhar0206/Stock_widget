@@ -53,6 +53,10 @@ def atomic_write_text(path: Path, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
             f.flush()
+            try:
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                pass
         for attempt in range(5):
             try:
                 os.replace(tmp, path)

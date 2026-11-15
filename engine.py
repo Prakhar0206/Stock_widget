@@ -11,10 +11,10 @@ from typing import Optional
 
 from config import Config
 from data_checks import IGNORED, PAUSED, PriceFilter
-from market_clock import Session
+from market_clock import Session, is_active_session
 from models import (ARMED, COOLDOWN, DISABLED, DISARMED, DONE, LEVEL_TYPES, PRIORITY_RANK, WAIT_CROSS,
                     Alert, AlertEvent, PriceTick, StockConfig)
-from positions import net_estimate, pct_distance, price_from_pct, stock_base
+from positions import net_estimate, pct_distance, price_from_pct, q2, stock_base
 from zones import TAGS, ZONE_GROUPS, ZoneTracker, band_for, build_zone_defs
 
 VALID_ALERT_STATES = frozenset({ARMED, WAIT_CROSS, DISARMED, COOLDOWN, DONE, DISABLED})
@@ -129,6 +129,9 @@ class AlertEngine:
     # ---- main entry ------------------------------------------------------------------------
     def process_tick(self, stock: StockConfig, tick: PriceTick, now: datetime,
                      session: Session) -> list:
+        if (tick.price is None or not isinstance(tick.price, Decimal)
+                or not tick.price.is_finite() or tick.price <= 0):
+            return []
         rt = self.runtime(stock.symbol)
         status = rt.filter.submit(tick.price)
         if status in (IGNORED, PAUSED):
@@ -139,13 +142,26 @@ class AlertEngine:
         ss = self.sym_state(stock.symbol)
         ss["last_price"] = str(price)
         ss["prev_close"] = str(tick.prev_close) if tick.prev_close else None
+        if tick.pre_price is not None:
+            ss["pre_price"] = str(tick.pre_price)
+        elif session == Session.PRE:
+            ss["pre_price"] = str(price)
+        if tick.reg_price is not None:
+            ss["reg_price"] = str(tick.reg_price)
+        elif session == Session.REGULAR:
+            ss["reg_price"] = str(price)
+        if tick.ah_price is not None:
+            ss["ah_price"] = str(tick.ah_price)
+        elif session == Session.AFTER:
+            ss["ah_price"] = str(price)
+
+        active = is_active_session(session, self.cfg.extended_hours)
+        if not active:
+            return []                      # outside active session: display only
 
         base = stock_base(stock, self.cfg.rates)
         p = pct_distance(price, base) if base is not None else None
         old_zone, new_zone = self._update_zone(stock, p, ss, rt)
-        regular = session == Session.REGULAR
-        if not regular:
-            return []                      # outside the regular session: display only
         first = not rt.seen
         prev = rt.prev_price
         rt.seen, rt.prev_price = True, price
@@ -221,7 +237,7 @@ class AlertEngine:
                 band = self.cfg.level_rearm_band_pct / 100
                 rearm_ok = price <= lvl * (1 - band) if above else price >= lvl * (1 + band)
                 fired = self._step(a, st, rt, cond, rearm_ok, now, stock.noisy)
-                cname = f"{'at or above' if above else 'at or below'} {lvl:.2f}"
+                cname = f"{'at or above' if above else 'at or below'} {q2(lvl):.2f}"
                 kind = "level"
             elif a.type in ("cross_above", "cross_below"):
                 lvl = self.level_price(a, base)
@@ -238,7 +254,7 @@ class AlertEngine:
                 if st["state"] == ARMED and crossed:
                     fired = True
                     self._after_fire(a, st, now)
-                cname = f"crossed {'above' if above else 'below'} {lvl:.2f}"
+                cname = f"crossed {'above' if above else 'below'} {q2(lvl):.2f}"
                 kind = "cross"
             else:  # pct_move_day
                 pc = tick.prev_close
@@ -279,8 +295,12 @@ class AlertEngine:
                 st["state"], st["cooldown_until"] = ARMED, None
                 rt.confirm[a.id] = 0
                 return False
-            self._after_fire(a, st, now, prev_close)       # still holds after cooldown: fire again
-            return True
+            if noisy:
+                st["state"], st["cooldown_until"] = ARMED, None
+                rt.confirm[a.id] = 0
+            else:
+                self._after_fire(a, st, now, prev_close)       # still holds after cooldown: fire again
+                return True
         # ARMED
         if not cond:
             rt.confirm[a.id] = 0
@@ -333,13 +353,13 @@ class AlertEngine:
             return []
         if choice != "fire_now":
             raise ValueError("this alert is already true: choose fire_now or wait_cross")
-        if session != Session.REGULAR:
-            return []                      # outside regular hours: stays ARMED until regular session
+        if not is_active_session(session, self.cfg.extended_hours):
+            return []                      # outside active hours: stays ARMED until active session
         self._after_fire(alert, st, now)
         base = stock_base(stock, self.cfg.rates)
         lvl = self.level_price(alert, base)
         above = alert.type == "level_above"
-        cname = f"{'at or above' if above else 'at or below'} {lvl:.2f}" if lvl is not None else "fired on creation"
+        cname = f"{'at or above' if above else 'at or below'} {q2(lvl):.2f}" if lvl is not None else "fired on creation"
         return [self._event(stock, tick, alert.id, "level", alert.label, alert.priority,
                             condition=cname, base=base, note=alert.note,
                             p=pct_distance(tick.price, base) if base is not None else None, now=now)]

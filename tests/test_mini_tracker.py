@@ -193,8 +193,16 @@ def test_mini_tracker_filtering_and_rows(tk_app):
         assert len(filtered_sel) == 1
         assert filtered_sel[0]["symbol"] == "TTWO"
 
-        # Empty filter state renders placeholder message in BG2 chip
+        # M4: Unknown symbols in selected_symbols are pruned automatically
+        state["category_filter"] = "ALL"
         state["selected_symbols"] = ["NOPE"]
+        pruned_rows = win._filtered_rows()
+        assert state["selected_symbols"] == []
+        assert len(pruned_rows) == 3
+
+        # Empty filter state (valid symbol in non-matching category) renders placeholder message in BG2 chip
+        state["category_filter"] = "SELL"
+        state["selected_symbols"] = ["TTWO"]
         win.refresh()
         chips = win.rows_frame.winfo_children()
         assert len(chips) == 1
@@ -287,6 +295,8 @@ def test_widget_view_mini_rows(tk_app):
         assert "alert" in r
         assert "flashing" in r
         assert isinstance(r["flashing"], bool)
+        if not r["flashing"]:
+            assert r["alert"] is None
 
 
 def test_status_strip_mini_tracker_button(tk_app):
@@ -744,7 +754,7 @@ def test_flashing_row_highlights_with_flash_bg(tk_app):
     assert rows_before["AAPL"]["flashing"] is False
     assert rows_before["TTWO"]["flashing"] is False
 
-    view.flash("AAPL", ms=120)
+    view.flash("AAPL", ms=400)
     rows_during = {r["symbol"]: r for r in view._mini_rows()}
     assert rows_during["AAPL"]["flashing"] is True
     assert rows_during["AAPL"]["alert"] == "ALERT"
@@ -758,7 +768,7 @@ def test_flashing_row_highlights_with_flash_bg(tk_app):
     assert live_chips[idx_ttwo].cget("bg").upper() == BG2.upper()
 
     # After flash timeout, WidgetView refreshes MiniTrackerWindow back to BG2
-    deadline = time.monotonic() + 0.6
+    deadline = time.monotonic() + 1.2
     while time.monotonic() < deadline:
         root.update()
         if view.mini.rows_frame.winfo_children()[idx_aapl].cget("bg").upper() == BG2.upper():

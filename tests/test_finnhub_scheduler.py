@@ -150,11 +150,23 @@ def test_outside_session_polls_every_15_minutes():
 
 
 def test_outside_session_wakes_at_market_open():
+    from dataclasses import replace
     from market_clock import ET
-    # Monday Oct 26 at 09:26 ET (4 minutes = 240 s before 09:30 ET regular open)
-    pre_open = datetime(2026, 10, 26, 9, 26, tzinfo=ET)
-    sc, mp, q = make({"AAPL": [100]}, now=pre_open)
+
+    # Default extended_hours=True: Monday Oct 26 at 03:56 ET (4 min = 240 s before 04:00 ET pre-market open)
+    closed_pre = datetime(2026, 10, 26, 3, 56, tzinfo=ET)
+    sc, mp, q = make({"AAPL": [100]}, now=closed_pre)
     assert sc.poll_once() == 240.0 and drain(q)[0][0] == "ticks"
+
+    # At 09:26 ET (PRE session): polls on active cadence with extended_hours=True
+    pre_open = datetime(2026, 10, 26, 9, 26, tzinfo=ET)
+    sc_pre, _, q_pre = make({"AAPL": [100]}, now=pre_open)
+    assert sc_pre.poll_once() < 240.0 and drain(q_pre)[0][0] == "ticks"
+
+    # With extended_hours=False, 09:26 ET wakes in 240 s at 09:30 ET regular open
+    sc_reg, _, q_reg = make({"AAPL": [100]}, now=pre_open)
+    sc_reg.cfg = replace(sc_reg.cfg, extended_hours=False)
+    assert sc_reg.poll_once() == 240.0 and drain(q_reg)[0][0] == "ticks"
 
 
 def test_budget_refusal_blocks_polling():

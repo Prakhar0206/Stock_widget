@@ -8,11 +8,11 @@ import random
 import threading
 import time
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Optional
 
 from config import BudgetError, Config, check_budget
 from data_checks import Backoff
-from market_clock import MarketCalendar, Session, utcnow
+from market_clock import MarketCalendar, Session, is_active_session, utcnow
 from providers.base import MalformedResponse, NetworkFailure, ProviderError, QuoteProvider, RateLimited
 
 log = logging.getLogger("saw.scheduler")
@@ -52,7 +52,6 @@ class Scheduler(threading.Thread):
         self._wake = threading.Event()
         self._stop_evt = threading.Event()   # NOT `_stop`: that name is Thread's own internal method
         self.provider_session = None            # set by the controller when the provider says otherwise
-        self._status_poll_counter = 0
 
     def request_now(self):
         """Wake, unlock, stock added: poll immediately."""
@@ -106,26 +105,35 @@ class Scheduler(threading.Thread):
     def poll_once(self) -> float:
         now = self.now_fn()
         session = self.provider_session or self.calendar.session_at(now)
-        regular = session == Session.REGULAR
-        sec_to_open = None
-        if not regular:
-            nxt_open = getattr(self.calendar, "next_regular_open", None)
-            if callable(nxt_open):
-                t_open = nxt_open(now)
+        extended = getattr(self.cfg, "extended_hours", True)
+        active = is_active_session(session, extended)
+
+        def _calc_nominal() -> float:
+            cur_now = self.now_fn()
+            sec_to_open = None
+            if not active:
+                nxt_sess = getattr(self.calendar, "next_session_open", None)
+                if callable(nxt_sess):
+                    t_open = nxt_sess(cur_now, extended)
+                else:
+                    nxt_open = getattr(self.calendar, "next_regular_open", None)
+                    t_open = nxt_open(cur_now) if callable(nxt_open) else None
                 if t_open is not None:
-                    sec_to_open = (t_open - now).total_seconds()
-        nominal = next_delay(regular, self.epoch_fn(), self.cfg.poll_seconds, self.jitter_fn(),
-                             seconds_to_open=sec_to_open)
+                    sec_to_open = (t_open - cur_now).total_seconds()
+            return next_delay(active, self.epoch_fn(), self.cfg.poll_seconds, self.jitter_fn(),
+                              seconds_to_open=sec_to_open)
+
         symbols = list(self.get_symbols())
         if not symbols:
-            return nominal
+            return _calc_nominal()
         num_keys = max(1, getattr(self.provider, "key_count", 1) or 1)
         try:
-            check_budget(len(symbols), self.cfg.poll_seconds if regular else CLOSED_POLL_S, num_keys=num_keys)
+            check_budget(len(symbols), self.cfg.poll_seconds if active else CLOSED_POLL_S, num_keys=num_keys)
         except BudgetError as exc:
             self.out.put(("error", "budget", str(exc), now))
-            return nominal
+            return _calc_nominal()
         try:
+            setattr(self.provider, "current_session", session.value)
             ticks = self.provider.fetch_quotes(symbols)
             self._emit_invalid_keys(now)
             self.out.put(("ticks", ticks, self.now_fn()))
@@ -136,41 +144,32 @@ class Scheduler(threading.Thread):
             text = str(exc)
             kind = "server" if ("HTTP 5" in text or getattr(self.provider, "server_down", False)) else "rate"
             self.out.put(("error", kind, text, now))
-            if not regular:
-                # Closed market: if any healthy key remains, retry immediately; else wait
-                healthy_fn = getattr(self.provider, "healthy_key_count", None)
-                if callable(healthy_fn) and healthy_fn() > 0:
-                    return 0.0
-                return nominal
-            # Multi-key slot rotation pauses until the next 15s slot when all keys fail;
+            # Multi-key slot rotation pauses until the next slot when all keys fail;
             # single-key retains exponential backoff compatibility.
             if num_keys > 1:
-                return nominal
-            return self.backoff.next_delay()
+                return _calc_nominal()
+            delay = float(self.backoff.next_delay())
+            return min(_calc_nominal(), delay) if not active else delay
         except NetworkFailure as exc:
             self._emit_partial(exc, self.now_fn())
-            d = min(self.backoff.next_delay(), nominal)
+            d = min(self.backoff.next_delay(), _calc_nominal())
             self.out.put(("error", "network", str(exc), now))
             return d
         except MalformedResponse as exc:
             self._emit_invalid_keys(now)
             self.out.put(("error", "malformed", str(exc), now))
-            return nominal
+            return _calc_nominal()
         except ProviderError as exc:
             self._emit_invalid_keys(now)
             self._emit_partial(exc, self.now_fn())
             self.out.put(("error", "auth", str(exc), now))
-            if not regular:
-                healthy_fn = getattr(self.provider, "healthy_key_count", None)
-                if callable(healthy_fn) and healthy_fn() > 0:
-                    return 0.0
             if num_keys > 1:
-                return nominal
-            return max(nominal, 300.0)          # do not hammer with a rejected key
+                return _calc_nominal()
+            return max(_calc_nominal(), 300.0)          # do not hammer with a rejected key
         except Exception as exc:                # never let the worker die
             log.exception("unexpected poll failure")
             self.out.put(("error", "malformed", type(exc).__name__, now))
-            return nominal
+            return _calc_nominal()
         if self.provider_session is None:
             try:                                    # market status rides along with polls
                 st = self.provider.fetch_market_status()
@@ -178,4 +177,4 @@ class Scheduler(threading.Thread):
                     self.out.put(("status", st, self.now_fn()))
             except Exception as exc:
                 log.info("market status unavailable: %s", type(exc).__name__)
-        return nominal
+        return _calc_nominal()

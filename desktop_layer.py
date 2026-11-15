@@ -10,11 +10,7 @@ import ctypes
 import sys
 import threading
 from ctypes import wintypes
-
-try:
-    from hit_testing import hit_code, should_be_solid
-except ImportError:
-    from .hit_testing import hit_code, should_be_solid
+from typing import Tuple
 
 if sys.platform != "win32":
     raise ImportError("desktop_layer only runs on Windows")
@@ -100,6 +96,7 @@ GetModuleHandleW = _proto(kernel32.GetModuleHandleW, wintypes.HMODULE, wintypes.
 GetCurrentThreadId = _proto(kernel32.GetCurrentThreadId, wintypes.DWORD)
 CreateMutexW = _proto(kernel32.CreateMutexW, wintypes.HANDLE, ctypes.c_void_p,
                       wintypes.BOOL, wintypes.LPCWSTR)
+CloseHandle = _proto(kernel32.CloseHandle, wintypes.BOOL, wintypes.HANDLE)
 
 # Constants
 HWND_TOP, HWND_BOTTOM, HWND_TOPMOST, HWND_NOTOPMOST = 0, 1, -1, -2
@@ -175,10 +172,19 @@ def find_desktop_window():
 # ----------------------------------------------------------------------------
 # Global hotkey listener (low-level keyboard hook on its own thread)
 # ----------------------------------------------------------------------------
-def peek_starts(down: bool, alt: bool, ctrl: bool, shift: bool, swallowing: bool) -> bool:
+_MODIFIER_VKS = frozenset({
+    VK_SHIFT, VK_CONTROL, VK_MENU,
+    0x5B, 0x5C,                                    # VK_LWIN, VK_RWIN
+    0xA0, 0xA1,                                    # VK_LSHIFT, VK_RSHIFT
+    0xA2, 0xA3,                                    # VK_LCONTROL, VK_RCONTROL
+    0xA4, 0xA5,                                    # VK_LMENU, VK_RMENU
+})
+
+
+def peek_starts(vk: int, down: bool, alt: bool, ctrl: bool, shift: bool) -> bool:
     """Alt+W starts a peek and its W is swallowed. Alt+Shift+W is NOT a peek: it is the edit-mode
     hotkey, so the W must reach Windows and RegisterHotKey must fire."""
-    return down and (swallowing or (alt and not ctrl and not shift))
+    return down and alt and not ctrl and not shift and vk not in _MODIFIER_VKS
 
 
 class HotkeyListener(threading.Thread):
@@ -214,6 +220,8 @@ class HotkeyListener(threading.Thread):
             self._ready.wait(1.0)           # stop() right after start() must not be lost
         if self._thread_id:
             PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=0.5)
 
     @staticmethod
     def _mask_alt():
@@ -230,8 +238,11 @@ class HotkeyListener(threading.Thread):
                     down = w_param in (WM_KEYDOWN, WM_SYSKEYDOWN)
                     alt, ctrl = key_down(VK_MENU), key_down(VK_CONTROL)
                     shift = key_down(VK_SHIFT)
+                    if not alt and (self._swallowing or self.peek_key_down):
+                        self._swallowing = False
+                        self.peek_key_down = False
                     if kb.vkCode == self._peek_vk:
-                        if peek_starts(down, alt, ctrl, shift, self._swallowing):
+                        if peek_starts(kb.vkCode, down, alt, ctrl, shift):
                             if not self._swallowing:
                                 self._mask_alt()
                             self._swallowing = True
@@ -291,6 +302,8 @@ def single_instance(name: str = "Local\\StockAlertWidget_SingleInstance"):
     """Returns a handle to keep alive, or None when another copy is already running."""
     handle = CreateMutexW(None, False, name)
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        if handle:
+            CloseHandle(handle)
         return None
     return handle
 
@@ -378,6 +391,13 @@ def work_area(hwnd=None, point=None, index=None):
     except Exception:
         pass
     return _primary_work_area()
+
+
+def work_area_for_point(x: int, y: int) -> Tuple[int, int, int, int]:
+    """Work area (left, top, right, bottom) of the monitor holding (x, y)."""
+    if sys.platform == "win32":
+        return work_area(point=(int(x), int(y)))
+    return 0, 0, max(1, GetSystemMetrics(SM_CXSCREEN)), max(1, GetSystemMetrics(SM_CYSCREEN))
 
 
 def fit_in_rect(x, y, width, height, rect):
@@ -554,6 +574,10 @@ class DesktopLayer:
         self.allow_geometry = True
         try:
             SetWindowPos(self.hwnd, 0, x, y, self.width, self.height, SWP_NOZORDER | SWP_NOACTIVATE)
+            try:
+                self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+            except Exception:
+                pass
         finally:
             self.allow_geometry = False
 
@@ -716,181 +740,3 @@ class DesktopLayer:
                 self.reposition_pending = False
                 self._reposition()
             self.enforce_zorder()
-
-
-# ----------------------------------------------------------------------------
-# Selective click-through for floating companion windows (Mini Tracker)
-# ----------------------------------------------------------------------------
-GetAncestor = _proto(user32.GetAncestor, HWND, HWND, wintypes.UINT)
-GetWindowLongPtrW = _proto(
-    user32["GetWindowLongPtrW" if ctypes.sizeof(ctypes.c_void_p) == 8 else "GetWindowLongW"],
-    ctypes.c_void_p, HWND, ctypes.c_int)
-IsWindow = _proto(user32.IsWindow, wintypes.BOOL, HWND)
-GA_ROOT, VK_LBUTTON = 2, 0x01
-SWP_REFRESH = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
-_orphaned_procs = []     # subclass procs we could not unhook; they must stay alive
-
-
-def toplevel_hwnd(widget):
-    """The real top-level HWND of a Tk window. Tk's winfo_id() is the inner child window; the
-    styles (WS_EX_TRANSPARENT ...) must go on the wrapper above it. Re-resolve whenever needed:
-    Tk may re-create the wrapper (overrideredirect / alpha / transparentcolor changes)."""
-    wid = widget.winfo_id()
-    return GetAncestor(wid, GA_ROOT) or GetParent(wid) or wid
-
-
-class SelectiveClickThrough:
-    """Everything outside `solid_rects_fn()` (screen rects, e.g. the header) passes mouse clicks
-    to the windows underneath; the solid rects stay clickable.
-
-    * A cursor poller toggles WS_EX_TRANSPARENT (needs WS_EX_LAYERED) on the top-level window:
-      cursor over a solid rect -> solid, anywhere else -> click-through. This is what lets clicks
-      reach OTHER applications.
-    * A WM_NCHITTEST subclass answers HTTRANSPARENT outside the solid rects as a second layer.
-    * The HWND is resolved on every tick, so a re-created Tk wrapper window is picked up again.
-    """
-
-    def __init__(self, widget, solid_rects_fn, poll_ms=25):
-        self.widget, self.solid_rects_fn, self.poll_ms = widget, solid_rects_fn, poll_ms
-        self.hwnd = None
-        self.active = False
-        self._job = None
-        self._old = self._proc = self._proc_ptr = None
-        self._pt = wintypes.POINT()
-
-    # ---- lifecycle -------------------------------------------------------------------------
-    def start(self):
-        if self.active:
-            return
-        self.active = True
-        self._tick()
-
-    def stop(self):
-        self.active = False
-        if self._job is not None:
-            try:
-                self.widget.after_cancel(self._job)
-            except Exception:
-                pass
-            self._job = None
-        hwnd = self.hwnd
-        self._unhook()
-        if hwnd and IsWindow(hwnd):
-            self._set_transparent(hwnd, False)
-        self.hwnd = None
-
-    # ---- internals -------------------------------------------------------------------------
-    def _rects(self):
-        try:
-            return list(self.solid_rects_fn())
-        except Exception:
-            return []
-
-    def _resolve(self):
-        try:
-            hwnd = toplevel_hwnd(self.widget)
-        except Exception:
-            return None
-        return hwnd if hwnd and IsWindow(hwnd) else None
-
-    def _bind(self, hwnd):
-        if hwnd == self.hwnd:
-            return
-        self._unhook()
-        self.hwnd = hwnd
-        ex = GetWindowLongW(hwnd, GWL_EXSTYLE) or 0
-        if not ex & WS_EX_LAYERED:      # WS_EX_TRANSPARENT click-through needs a layered window
-            SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
-            try:
-                alpha = float(self.widget.attributes("-alpha"))
-            except Exception:
-                alpha = 1.0
-            SetLayeredWindowAttributes(hwnd, 0, int(max(0.0, min(1.0, alpha)) * 255), LWA_ALPHA)
-        self._hook(hwnd)
-
-    def _hook(self, hwnd):
-        def _wndproc(h, msg, wparam, lparam):
-            try:
-                if msg == WM_NCHITTEST and self.active:
-                    x = ctypes.c_short(lparam & 0xFFFF).value
-                    y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
-                    return hit_code(x, y, self._rects())
-            except Exception:
-                pass
-            return CallWindowProcW(self._old, h, msg, wparam, lparam)
-
-        proc = WNDPROC(_wndproc)
-        ptr = ctypes.cast(proc, ctypes.c_void_p).value
-        old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ptr)
-        if old:
-            self._old, self._proc, self._proc_ptr = old, proc, ptr
-        else:                           # could not subclass: the style poller still works alone
-            self._old = self._proc = self._proc_ptr = None
-
-    def _unhook(self):
-        hwnd, proc = self.hwnd, self._proc
-        if not (hwnd and proc and self._old):
-            self._old = self._proc = self._proc_ptr = None
-            return
-        try:
-            if IsWindow(hwnd) and GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == self._proc_ptr:
-                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, self._old)
-            else:
-                _orphaned_procs.append(proc)    # still in the chain (or window gone): keep alive
-        except Exception:
-            _orphaned_procs.append(proc)
-        self._old = self._proc = self._proc_ptr = None
-
-    def _targets(self):
-        hwnd = self.hwnd
-        if not hwnd or not IsWindow(hwnd):
-            return []
-        try:
-            wid = self.widget.winfo_id()
-        except Exception:
-            wid = None
-        targets = [hwnd]
-        if wid and wid != hwnd and IsWindow(wid):
-            targets.append(wid)
-        return targets
-
-    def _set_transparent(self, hwnd, on):
-        targets = self._targets() if self.hwnd else ([hwnd] if (hwnd and IsWindow(hwnd)) else [])
-        for h in targets:
-            ex = GetWindowLongW(h, GWL_EXSTYLE) or 0
-            want = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
-            if want != ex:
-                SetWindowLongW(h, GWL_EXSTYLE, want)
-                SetWindowPos(h, 0, 0, 0, 0, 0, SWP_REFRESH)
-
-    def is_click_through(self):
-        return bool(self.hwnd and (GetWindowLongW(self.hwnd, GWL_EXSTYLE) or 0) & WS_EX_TRANSPARENT)
-
-    def poll_once(self):
-        """One poll step (also callable directly, e.g. from tests)."""
-        hwnd = self._resolve()
-        if not hwnd:
-            return
-        self._bind(hwnd)
-        GetCursorPos(ctypes.byref(self._pt))
-        solid = should_be_solid(self._pt.x, self._pt.y, self._rects(),
-                                button_down=key_down(VK_LBUTTON),
-                                currently_solid=not self.is_click_through())
-        self._set_transparent(hwnd, not solid)
-
-    def _tick(self):
-        self._job = None
-        if not self.active:
-            return
-        try:
-            if not self.widget.winfo_exists():
-                self.active = False
-                return
-            self.poll_once()
-        except Exception:
-            pass
-        if self.active:
-            try:
-                self._job = self.widget.after(self.poll_ms, self._tick)
-            except Exception:
-                self.active = False
