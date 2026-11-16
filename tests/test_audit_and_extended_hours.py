@@ -1784,7 +1784,7 @@ def test_item_6_2_send_test_alert_and_edit_panel_button(tmp_path, tk_root):
 
 def test_main_widget_header_gear_row_chips_closed_colors_and_legacy_look(tmp_path, tk_root):
     from ui.common import FG, GREEN, RED
-    from ui.widget import merged_look
+    from ui.widget import CLOSED_FG, CLOSED_GREEN, CLOSED_RED, merged_look
 
     # 1. Legacy clock look dict migrates cleanly to dark card panel defaults
     legacy = {
@@ -1819,6 +1819,8 @@ def test_main_widget_header_gear_row_chips_closed_colors_and_legacy_look(tmp_pat
     assert "pinned" not in ctrl.engine.state["mini_tracker"]
 
     t_closed = datetime(2026, 10, 24, 15, 0, tzinfo=ET)  # Saturday (CLOSED)
+    t_now = [t_closed]
+    ctrl.now_fn = lambda: t_now[0]
     ctrl.on_ticks(
         [
             _tick("AAPL", "207.50", prev="200", pre="201.00", reg="207.00", ah="207.50", t=t_closed),
@@ -1828,7 +1830,7 @@ def test_main_widget_header_gear_row_chips_closed_colors_and_legacy_look(tmp_pat
     )
 
     layer = _FakeLayer()
-    view = WidgetView(tk_root, ctrl, layer, migrated, now_fn=lambda: t_closed)
+    view = WidgetView(tk_root, ctrl, layer, migrated, now_fn=lambda: t_now[0])
     try:
         view.render()
         c = view.canvas
@@ -1855,20 +1857,53 @@ def test_main_widget_header_gear_row_chips_closed_colors_and_legacy_look(tmp_pat
         ]
         assert len(card_polys) == 3  # 1 header card + 2 row chips
 
-        # Even when CLOSED (r.color == "dim"), tickers stay FG and ▲/▼ changes stay GREEN/RED
+        # When CLOSED: PH/RH/AH are uniform CLOSED_FG, tickers are CLOSED_FG, ▲/▼ changes use soft CLOSED_GREEN/CLOSED_RED
         fills_by_text: dict[str, list[str]] = {}
         for i in c.find_all():
             if c.type(i) == "text":
                 fills_by_text.setdefault(c.itemcget(i, "text"), []).append(c.itemcget(i, "fill").upper())
-        assert fills_by_text["AAPL"] == [FG.upper(), MUTED.upper()]
-        assert fills_by_text["NVDA"] == [FG.upper(), MUTED.upper()]
-        assert fills_by_text["207.00"] == [FG.upper()]
-        assert fills_by_text["207.50"] == [FG.upper()]
-        assert fills_by_text["201.00"] == [MUTED.upper()]
+        assert fills_by_text["AAPL"] == [CLOSED_FG.upper(), MUTED.upper()]
+        assert fills_by_text["NVDA"] == [CLOSED_FG.upper(), MUTED.upper()]
+        assert fills_by_text["201.00"] == [CLOSED_FG.upper()]
+        assert fills_by_text["207.00"] == [CLOSED_FG.upper()]
+        assert fills_by_text["207.50"] == [CLOSED_FG.upper()]
         up_chg = next(v[0] for k, v in fills_by_text.items() if k.startswith("▲ "))
         dn_chg = next(v[0] for k, v in fills_by_text.items() if k.startswith("▼ "))
-        assert up_chg == GREEN.upper()
-        assert dn_chg == RED.upper()
+        assert up_chg == CLOSED_GREEN.upper()
+        assert dn_chg == CLOSED_RED.upper()
+        assert up_chg not in (GREEN.upper(), DIM.upper())
+        assert dn_chg not in (RED.upper(), DIM.upper())
+
+        # Verify borderless gear background and symmetric card alignment
+        gear_bg = c.find_withtag("settings_gear_bg")[0]
+        assert c.itemcget(gear_bg, "outline") == ""
+        w_canvas = int(float(c.cget("width")))
+        for poly in card_polys:
+            xs_poly = c.coords(poly)[0::2]
+            assert min(xs_poly) == w_canvas - max(xs_poly)
+
+        # When REGULAR opens: active column is FG, inactive columns are MUTED, and ▲/▼ turn vivid GREEN/RED
+        ctrl.session_override = Session.REGULAR
+        t_reg = datetime(2026, 10, 26, 11, 0, tzinfo=ET)
+        t_now[0] = t_reg
+        ctrl.on_ticks(
+            [
+                _tick("AAPL", "207.50", prev="200", pre="201.00", reg="207.50", ah="208.00", t=t_reg),
+                _tick("NVDA", "161.01", prev="166.19", pre="167.21", reg="161.01", ah="162.85", t=t_reg),
+            ],
+            t_reg,
+        )
+        view.render()
+        live_fills: dict[str, list[str]] = {}
+        for i in c.find_all():
+            if c.type(i) == "text":
+                live_fills.setdefault(c.itemcget(i, "text"), []).append(c.itemcget(i, "fill").upper())
+        assert live_fills["AAPL"] == [FG.upper(), MUTED.upper()]
+        assert live_fills["201.00"] == [MUTED.upper()]
+        assert live_fills["207.50"] == [FG.upper()]
+        assert live_fills["208.00"] == [MUTED.upper()]
+        assert next(v[0] for k, v in live_fills.items() if k.startswith("▲ ")) == GREEN.upper()
+        assert next(v[0] for k, v in live_fills.items() if k.startswith("▼ ")) == RED.upper()
 
         # Clicking settings gear opens Edit Mode
         assert view.editing is False

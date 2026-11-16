@@ -131,7 +131,8 @@ class FinnhubProvider(QuoteProvider):
         self._slots = keys or [None]            # keyless mode: one anonymous slot, no token header
         self._multi = len(keys) > 1             # failover and quarantine gating only exist with 2+ keys
         self._pool_lock = threading.Lock()
-        self._next = 0                          # slot pointer: next key to lead a slot
+        self._next = 0                          # slot pointer: next key to lead a fetch_quotes slot
+        self._status_next = 0                   # independent pointer for fetch_market_status (_get)
         self._calls = [0] * len(self._slots)    # attempts per slot (diagnostics)
         self.quarantined_until: dict = {}       # key -> monotonic deadline after a 429
         self.rejected_until: dict = {}          # key -> monotonic deadline after a 401/403
@@ -222,14 +223,15 @@ class FinnhubProvider(QuoteProvider):
             self._invalid_key_events.clear()
         return out
 
-    def _acquire_slot_key(self, tried: set) -> Optional[int]:
-        """Select the next healthy key for the current slot, starting from `self._next`,
-        skipping keys already tried in this slot or currently in cooldown/rejected quarantine."""
+    def _acquire_slot_key(self, tried: set, status: bool = False) -> Optional[int]:
+        """Select the next healthy key for the current slot, starting from the quote or status
+        pointer, skipping keys already tried in this slot or in cooldown/rejected quarantine."""
         now = self._clock()
         with self._pool_lock:
             n = len(self._slots)
+            start = self._status_next if status else self._next
             for step in range(n):
-                i = (self._next + step) % n
+                i = (start + step) % n
                 if i in tried:
                     continue
                 if self._multi and not self._usable(self._slots[i], now):
@@ -257,11 +259,15 @@ class FinnhubProvider(QuoteProvider):
         if was_rejected:
             log.info("key #%d accepted again; back in rotation", idx + 1)
 
-    def _on_slot_key_succeeded(self, idx: int) -> None:
+    def _on_slot_key_succeeded(self, idx: int, status: bool = False) -> None:
         """Rotation advances to the NEXT key after the one that last SUCCEEDED."""
         with self._pool_lock:
             n = len(self._slots)
-            self._next = (idx + 1) % n
+            nxt = (idx + 1) % n
+            if status:
+                self._status_next = nxt
+            else:
+                self._next = nxt
 
     def _on_rate_limited(self, idx: int) -> RateLimited:
         key = self._slots[idx]
@@ -277,8 +283,12 @@ class FinnhubProvider(QuoteProvider):
             self.rejected_until.pop(key, None)
             self._rejected_active.discard(key)
             self._notified_invalid_keys.discard(idx + 1)
-            if self._next == idx and len(self._slots) > 1:
-                self._next = (idx + 1) % len(self._slots)
+            if len(self._slots) > 1:
+                nxt = (idx + 1) % len(self._slots)
+                if self._next == idx:
+                    self._next = nxt
+                if self._status_next == idx:
+                    self._status_next = nxt
             healthy = sum(1 for k in self._keys if self._usable(k, now))
         log.warning("key #%d of %d rate limited (HTTP 429, strike #%d); quarantined %.0f s; %d healthy key(s) left",
                     idx + 1, len(self._slots), strikes, cooldown, healthy)
@@ -296,8 +306,12 @@ class FinnhubProvider(QuoteProvider):
             self._rate_limited_active.discard(key)
             self._rate_limit_strikes.pop(key, None)
             self._last_reject_code = code
-            if self._next == idx and len(self._slots) > 1:
-                self._next = (idx + 1) % len(self._slots)
+            if len(self._slots) > 1:
+                nxt = (idx + 1) % len(self._slots)
+                if self._next == idx:
+                    self._next = nxt
+                if self._status_next == idx:
+                    self._status_next = nxt
             if key_num not in self._notified_invalid_keys:
                 self._notified_invalid_keys.add(key_num)
                 self._invalid_key_events.append((key_num, code))
@@ -311,8 +325,12 @@ class FinnhubProvider(QuoteProvider):
         with self._pool_lock:
             self._offline = False
             self._server_down = True
-            if self._next == idx and len(self._slots) > 1:
-                self._next = (idx + 1) % len(self._slots)
+            if len(self._slots) > 1:
+                nxt = (idx + 1) % len(self._slots)
+                if self._next == idx:
+                    self._next = nxt
+                if self._status_next == idx:
+                    self._status_next = nxt
         log.warning("Finnhub server error (HTTP %d) on key #%d", code, idx + 1)
         return RateLimited(f"HTTP {code}")
 
@@ -392,13 +410,13 @@ class FinnhubProvider(QuoteProvider):
         tried: set = set()
         last: Optional[Exception] = None
         while True:
-            idx = self._acquire_slot_key(tried)
+            idx = self._acquire_slot_key(tried, status=True)
             if idx is None:
                 raise self._exhausted(last)
             tried.add(idx)
             try:
                 data = self._request_with_key(idx, path, params)
-                self._on_slot_key_succeeded(idx)
+                self._on_slot_key_succeeded(idx, status=True)
                 return data
             except (RateLimited, ProviderError) as exc:
                 last = exc

@@ -233,6 +233,45 @@ def test_market_status_also_rotates():
     assert tokens(s) == ["k1", "k2"]
 
 
+def test_live_scheduler_distributes_quotes_and_status_equally_across_all_keys(tmp_path):
+    """When Scheduler calls both fetch_quotes() and fetch_market_status() in each poll
+    (provider_session=None), all 4 keys share equal quote + status load without even/odd skew."""
+    class _LiveSession:
+        def __init__(self):
+            self.headers = {}
+            self.quote_tokens = []
+            self.status_tokens = []
+
+        def get(self, url, params=None, timeout=None):
+            tok = self.headers.get("X-Finnhub-Token")
+            if url.endswith("/stock/market-status"):
+                self.status_tokens.append(tok)
+                return Resp(200, '{"exchange": "US", "isOpen": false, "holiday": null, "session": "pre-market"}')
+            self.quote_tokens.append(tok)
+            return Resp(200, GOOD)
+
+        def close(self):
+            pass
+
+    sess = _LiveSession()
+    syms = [f"S{i}" for i in range(9)]
+    ctrl, sched, q, provider, _, _, clock = make_controller(
+        tmp_path, keys=("k1", "k2", "k3", "k4"), symbols=syms,
+        session=sess, session_override=None,
+    )
+    sched.provider_session = None
+    for _ in range(8):
+        sched.poll_once()
+        ctrl.drain(q)
+        clock.advance(15)
+
+    assert [k["calls"] for k in provider.pool_status()] == [20, 20, 20, 20]
+    assert {k: sess.quote_tokens.count(k) for k in ("k1", "k2", "k3", "k4")} == {
+        "k1": 18, "k2": 18, "k3": 18, "k4": 18,
+    }
+    assert sess.status_tokens == ["k1", "k2", "k3", "k4", "k1", "k2", "k3", "k4"]
+
+
 # ============================================================================================
 # 10 REQUIRED VERIFICATION SCENARIOS (Section 5)
 # ============================================================================================

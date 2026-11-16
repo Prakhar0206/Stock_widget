@@ -21,6 +21,9 @@ DEFAULT_LOOK = {"anchor": "top-right", "margin_x": 24, "margin_y": 24, "pos_x": 
                 "shadow_offset": 0, "background_mode": "panel", "panel_color": "#202020",
                 "opacity": 0.92, "padding": 10}
 COLORS = {"up": GREEN, "down": RED, "neutral": GREY, "amber": AMBER, "dim": DIM}
+CLOSED_FG = "#B8BFC9"                           # uniform crisp silver for closed PH/RH/AH & tickers
+CLOSED_GREEN = "#5A9E74"                        # muted off-hours gain color when market is closed
+CLOSED_RED = "#B56A6A"                          # muted off-hours loss color when market is closed
 DIM_DOT_COLORS = {"green": "#1E5631", "amber": "#785116", "red": "#6E1D1D"}
 PULSE_DOT_COLORS = {"green": "#86EFAC", "amber": "#FCD34D", "red": "#FCA5A5"}
 FLASH_BG = "#4B5563"
@@ -511,13 +514,18 @@ class WidgetView:
         pad, gap = lk["padding"], 10
         text_h = f.metrics("linespace")
         lh = text_h + 2
-        chip_h = text_h + 5
-        row_gap = 2
+        chip_h = text_h + 6
+        row_gap = 3
         row_step = chip_h + row_gap
         card_pad = max(4, pad - 4)
+        inner_pad = 7
         card_x1 = card_pad
+        content_x1 = card_x1 + inner_pad
         flashing = self.flashing()
         text = lk["text_color"]
+
+        def _card_pts(x1, y1, x2, y2):
+            return [x1, y1, x2, y1, x2, y2, x1, y2]
 
         def wmax(font, vals):
             return max([font.measure(v) for v in vals] + [0])
@@ -528,28 +536,27 @@ class WidgetView:
               wmax(f, [f"{r.arrow} {r.change_text}" for r in rows]),
               wmax(f, [r.category for r in rows]), wmax(f, [r.zone_tag or r.warning for r in rows]),
               wmax(f, [f"{r.alerts} alert{'s' if r.alerts != 1 else ''}" for r in rows])]
-        xs, x = [], pad
+        xs, x = [], content_x1
         for w_ in cw:
             xs.append(x)
             x += w_ + gap
-        table_w = max(x - gap, pad) - pad
-        y = pad
+        table_w = max(x - gap, content_x1) - content_x1
         hdr_y1 = card_pad
-        hdr_y2 = pad + lh + 3
+        hdr_y2 = card_pad + lh + 6
+        header_mid = (hdr_y1 + hdr_y2) // 2
         header_card = None
         if not self.transparent:
             header_card = c.create_polygon(
-                rounded_rect_points(card_x1, hdr_y1, card_x1 + 120, hdr_y2, 4),
-                smooth=True, fill=BG2, outline="#444444", width=1, tags=("header_card",),
+                _card_pts(card_x1, hdr_y1, card_x1 + 120, hdr_y2),
+                fill=BG2, outline="#444444", width=1, tags=("header_card",),
             )
 
         # ---- Corner Status Strip: [ ☀️ / 🌙 ] [ Heartbeat Dot ] [ Clocks ] [ Problems ] [ Mini ] [ ⚙ ]
-        hx = pad
-        mid = y + lh // 2
+        hx = content_x1
 
         # 1. Sun / Moon Icon
         sun_moon_tag = "status_sun_moon"
-        sm_item = self._t(hx, y, strip.session_icon, text, fb, tags=(sun_moon_tag,))
+        sm_item = self._t(hx, header_mid, strip.session_icon, text, fb, anchor="w", tags=(sun_moon_tag,))
         self._bind_tooltip(sun_moon_tag, strip.session_tooltip)
         hx = c.bbox(sm_item)[2] + 10
 
@@ -562,7 +569,7 @@ class WidgetView:
 
         # Dedicated arena for expanding sonar ripple
         cx = hx + int(base_r + 6)
-        cy = mid
+        cy = header_mid
         self._hb_center = (cx, cy)
 
         if strip.heartbeat_dim:
@@ -586,7 +593,7 @@ class WidgetView:
 
         # 3. Direct Clocks (IST | NY) - crisp FG text visible at a glance
         clock_str = f"{hv.ist}  |  {hv.ny}"
-        clk_item = self._t(hx, y, clock_str, FG, f, tags=("status_clocks",))
+        clk_item = self._t(hx, header_mid, clock_str, FG, f, anchor="w", tags=("status_clocks",))
         self._bind_tooltip("status_clocks", f"{strip.session_tooltip} · {strip.heartbeat_tooltip}")
         hx = c.bbox(clk_item)[2] + 12
 
@@ -594,36 +601,35 @@ class WidgetView:
         for idx, prob in enumerate(strip.problems):
             ptag = f"status_problem_{idx}"
             pcol = RED if prob.color == "red" else AMBER
-            g_item = self._t(hx, y, prob.glyph, pcol, self.fs, tags=(ptag,))
+            g_item = self._t(hx, header_mid, prob.glyph, pcol, self.fs, anchor="w", tags=(ptag,))
             hx = c.bbox(g_item)[2]
             if prob.badge:
-                b_item = self._t(hx + 2, y + 1, prob.badge, pcol, self.fbadge, tags=(ptag,))
+                b_item = self._t(hx + 2, header_mid + 1, prob.badge, pcol, self.fbadge, anchor="w", tags=(ptag,))
                 hx = c.bbox(b_item)[2]
             self._bind_tooltip(ptag, prob.tooltip)
             hx += 10
 
         if strip.overflow_count > 0:
             otag = "status_problem_overflow"
-            o_item = self._t(hx, y + 1, f"+{strip.overflow_count}", AMBER, self.fbadge, tags=(otag,))
+            o_item = self._t(hx, header_mid, f"+{strip.overflow_count}", AMBER, self.fbadge, anchor="w", tags=(otag,))
             self._bind_tooltip(otag, strip.overflow_tooltip or f"{strip.overflow_count} more problem(s)")
             hx = c.bbox(o_item)[2] + 10
 
         if hv.muted:
             mtag = "status_muted"
-            m_item = self._t(hx, y, "🔇", AMBER, self.fs, tags=(mtag,))
+            m_item = self._t(hx, header_mid, "🔇", AMBER, self.fs, anchor="w", tags=(mtag,))
             self._bind_tooltip(mtag, "Alerts muted")
             hx = c.bbox(m_item)[2] + 8
 
         # 5. Mini Tracker switch + Settings gear: reserve room now, draw right-aligned once width is known
         mini_open = self.mini_open
-        gear_w, gear_gap = 18, 6
+        gear_w, gear_gap = 16, 5
         mini_w = self.fs.measure("Mini") + 6 + TOGGLE_W
-        header_mid = mid
-        hx_end = hx + TOGGLE_GAP + mini_w + 2 + gear_gap + gear_w
+        hx_end = hx + TOGGLE_GAP + mini_w + 4 + gear_gap + gear_w
 
-        y = hdr_y2 + 3
+        y = hdr_y2 + 4
         strip_div_y = y
-        strip_div = c.create_line(card_x1, strip_div_y, card_x1 + 1, strip_div_y, fill="#333333", width=1)
+        strip_div = c.create_line(card_x1 + 2, strip_div_y, card_x1 + 3, strip_div_y, fill="#333333", width=1)
         y += 4
 
         # ---- Stock rows ----------------------------------------------------------------------------
@@ -642,12 +648,12 @@ class WidgetView:
                 if is_active_col:
                     hb = c.bbox(hdr_item)
                     if hb:
-                        uy = hb[3]
+                        uy = hb[3] + 1
                         c.create_line(hb[0], uy, hb[2], uy, fill=ACCENT, width=2)
-            y += lh_small + 2
+            y += lh_small + 4
             hdr_div_y = y - 1
-            hdr_div = c.create_line(card_x1, hdr_div_y, card_x1 + 1, hdr_div_y, fill="#2A2A2A", width=1)
-            y += 3
+            hdr_div = c.create_line(card_x1 + 2, hdr_div_y, card_x1 + 3, hdr_div_y, fill="#2A2A2A", width=1)
+            y += 4
         row_chips = []
         flash_rects = []
         for r in rows:
@@ -661,75 +667,80 @@ class WidgetView:
             elif not self.transparent:
                 row_chips.append((
                     c.create_polygon(
-                        rounded_rect_points(card_x1, ry1, card_x1 + max(table_w, 120), ry2, 4),
-                        smooth=True, fill=BG2, outline="#444444", width=1,
+                        _card_pts(card_x1, ry1, card_x1 + max(table_w, 120), ry2),
+                        fill=BG2, outline="#444444", width=1,
                     ),
                     ry1, ry2,
                 ))
-            ty = y + 2
+            row_cy = (ry1 + ry2) / 2
             is_warn = r.color == "amber"
-            sym_col = AMBER if is_warn else FG
-            chg_col = AMBER if is_warn else (GREEN if r.arrow == "▲" else (RED if r.arrow == "▼" else MUTED))
+            is_closed = (r.color == "dim") or (active_sess not in ("PRE", "REGULAR", "AFTER"))
             if is_warn:
+                sym_col = AMBER
+                chg_col = AMBER
                 ph_col = rh_col = ah_col = AMBER
                 ph_font = rh_font = ah_font = f
-            elif active_sess == "PRE":
-                ph_col, rh_col, ah_col = FG, MUTED, MUTED
-                ph_font, rh_font, ah_font = fb, f, f
-            elif active_sess == "REGULAR":
-                ph_col, rh_col, ah_col = MUTED, FG, MUTED
-                ph_font, rh_font, ah_font = f, fb, f
-            elif active_sess == "AFTER":
-                ph_col, rh_col, ah_col = MUTED, MUTED, FG
-                ph_font, rh_font, ah_font = f, f, fb
+            elif is_closed:
+                sym_col = CLOSED_FG
+                chg_col = CLOSED_GREEN if r.arrow == "▲" else (CLOSED_RED if r.arrow == "▼" else MUTED)
+                ph_col = rh_col = ah_col = CLOSED_FG
+                ph_font = rh_font = ah_font = f
             else:
-                ph_col, rh_col, ah_col = MUTED, FG, FG
-                ph_font, rh_font, ah_font = f, f, f
+                sym_col = FG
+                chg_col = GREEN if r.arrow == "▲" else (RED if r.arrow == "▼" else MUTED)
+                if active_sess == "PRE":
+                    ph_col, rh_col, ah_col = FG, MUTED, MUTED
+                    ph_font, rh_font, ah_font = fb, f, f
+                elif active_sess == "REGULAR":
+                    ph_col, rh_col, ah_col = MUTED, FG, MUTED
+                    ph_font, rh_font, ah_font = f, fb, f
+                else:  # AFTER
+                    ph_col, rh_col, ah_col = MUTED, MUTED, FG
+                    ph_font, rh_font, ah_font = f, f, fb
             tail_txt = r.zone_tag or r.warning
             if r.warning or is_warn:
                 tail_col = AMBER
             elif "BUY" in tail_txt.upper():
-                tail_col = GREEN
+                tail_col = CLOSED_GREEN if is_closed else GREEN
             elif "SELL" in tail_txt.upper():
-                tail_col = RED
+                tail_col = CLOSED_RED if is_closed else RED
             else:
-                tail_col = FG
-            self._t(xs[0], ty, r.symbol, sym_col, fb)
-            self._t(xs[1], ty, r.nickname, MUTED, f)
-            self._t(xs[2] + cw[2], ty, getattr(r, "ph_price_text", "—"), ph_col, ph_font, anchor="ne")
-            self._t(xs[3] + cw[3], ty, getattr(r, "rh_price_text", "—"), rh_col, rh_font, anchor="ne")
-            self._t(xs[4] + cw[4], ty, getattr(r, "ah_price_text", "—"), ah_col, ah_font, anchor="ne")
-            self._t(xs[5], ty, f"{r.arrow} {r.change_text}".strip(), chg_col, f)
-            self._t(xs[6], ty, r.category, MUTED, f)
-            self._t(xs[7], ty, tail_txt, tail_col, f)
-            self._t(xs[8], ty, f"{r.alerts} alert{'s' if r.alerts != 1 else ''}", MUTED, f)
+                tail_col = CLOSED_FG if is_closed else FG
+            self._t(xs[0], row_cy, r.symbol, sym_col, fb, anchor="w")
+            self._t(xs[1], row_cy, r.nickname, MUTED, f, anchor="w")
+            self._t(xs[2] + cw[2], row_cy, getattr(r, "ph_price_text", "—"), ph_col, ph_font, anchor="e")
+            self._t(xs[3] + cw[3], row_cy, getattr(r, "rh_price_text", "—"), rh_col, rh_font, anchor="e")
+            self._t(xs[4] + cw[4], row_cy, getattr(r, "ah_price_text", "—"), ah_col, ah_font, anchor="e")
+            self._t(xs[5], row_cy, f"{r.arrow} {r.change_text}".strip(), chg_col, f, anchor="w")
+            self._t(xs[6], row_cy, r.category, MUTED, f, anchor="w")
+            self._t(xs[7], row_cy, tail_txt, tail_col, f, anchor="w")
+            self._t(xs[8], row_cy, f"{r.alerts} alert{'s' if r.alerts != 1 else ''}", MUTED, f, anchor="w")
             y += row_step
         if not rows:
-            item = self._t(pad, y, "No stocks yet. Alt+Shift+W, then + Add stock.", GREY, f)
-            table_w = max(table_w, c.bbox(item)[2] - pad)
+            item = self._t(content_x1, y, "Click ⚙ or Alt+Shift+W, then + Add stock.", GREY, f)
+            table_w = max(table_w, c.bbox(item)[2] - content_x1)
             y += lh
-        wrap = max(360, table_w, hx_end - pad)
+        inner_w = max(360, table_w, hx_end - content_x1)
         for msg in warns:
-            item = self._t(pad, y + 4, msg, AMBER, self.fs, width=wrap)
+            item = self._t(content_x1, y + 4, msg, AMBER, self.fs, width=inner_w)
             y = c.bbox(item)[3] + 2
         shadow_pad = lk["shadow_offset"] if (lk["shadow_color"] and lk["shadow_offset"]) else 0
-        total_w = max(wrap, table_w, hx_end - pad) + 2 * pad + shadow_pad + 4
+        total_w = card_pad + inner_pad + inner_w + inner_pad + card_pad + shadow_pad
         if rows and not warns:
             y -= row_gap
         total_h = y + card_pad + shadow_pad
-        right_edge = total_w - pad - shadow_pad
         card_x2 = total_w - card_pad - shadow_pad
         if header_card is not None:
-            c.coords(header_card, *rounded_rect_points(card_x1, hdr_y1, card_x2, hdr_y2, 4))
+            c.coords(header_card, *_card_pts(card_x1, hdr_y1, card_x2, hdr_y2))
         for chip_id, ry1, ry2 in row_chips:
-            c.coords(chip_id, *rounded_rect_points(card_x1, ry1, card_x2, ry2, 4))
+            c.coords(chip_id, *_card_pts(card_x1, ry1, card_x2, ry2))
         for rect_id, ry1, ry2 in flash_rects:
             c.coords(rect_id, card_x1, ry1, card_x2, ry2)
-        c.coords(strip_div, card_x1, strip_div_y, card_x2, strip_div_y)
+        c.coords(strip_div, card_x1 + 2, strip_div_y, card_x2 - 2, strip_div_y)
         if hdr_div is not None:
-            c.coords(hdr_div, card_x1, hdr_div_y, card_x2, hdr_div_y)
-        gear_x2 = right_edge
-        mini_x1 = gear_x2 - gear_w - gear_gap - mini_w - 2
+            c.coords(hdr_div, card_x1 + 2, hdr_div_y, card_x2 - 2, hdr_div_y)
+        gear_x2 = card_x2 - inner_pad
+        mini_x1 = gear_x2 - gear_w - gear_gap - mini_w - 4
         self._draw_mini_toggle(mini_x1, header_mid, mini_open)
         self._draw_settings_gear(gear_x2, header_mid, gear_w)
         c.config(width=total_w, height=total_h)
@@ -755,8 +766,7 @@ class WidgetView:
         st = TOGGLE_ON if on else TOGGLE_OFF
 
         lbl_col = ACCENT if on else GREY
-        lh = self.fs.metrics("linespace")
-        lbl_item = self._t(x1, cy - lh // 2, "Mini", lbl_col, self.fs, tags=(tag,))
+        lbl_item = self._t(x1, cy, "Mini", lbl_col, self.fs, anchor="w", tags=(tag,))
         bbox = c.bbox(lbl_item)
         sw_x = (bbox[2] + 6) if bbox else (x1 + 30)
 
@@ -783,15 +793,14 @@ class WidgetView:
         gx1, gx2 = x2 - w, x2
         gy1, gy2 = cy - 9, cy + 9
         base_fill = "" if self.transparent else BG2
-        outline_col = "" if self.transparent else "#444444"
         bg_poly = c.create_polygon(
-            rounded_rect_points(gx1, gy1, gx2, gy2, 4), smooth=True,
-            fill=base_fill, outline=outline_col, width=1,
+            rounded_rect_points(gx1, gy1, gx2, gy2, 3), smooth=True,
+            fill=base_fill, outline="", width=0,
             tags=(tag, "settings_gear_bg"),
         )
         glyph = c.create_text(
             (gx1 + gx2) // 2, cy, text="⚙", fill=MUTED,
-            font=(self.look["font"], max(10, self.look["size"])),
+            font=(self.look["font"], max(11, self.look["size"] + 1)),
             anchor="center", tags=(tag, "settings_gear_icon"),
         )
         self._bind_tooltip(tag, "Settings / Edit Mode (Alt+Shift+W)")
