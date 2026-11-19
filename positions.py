@@ -1,9 +1,10 @@
-"""Money math (blueprint section 4 / 4.1). Decimal only, ROUND_HALF_UP to cents."""
+"""Manual trade figures and percentage target math (Decimal only, ROUND_HALF_UP)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
+
+from models import StockConfig, TradeInfo
 
 CENT = Decimal("0.01")
 ZERO = Decimal(0)
@@ -17,67 +18,12 @@ def q2(x) -> Decimal:
     return D(x).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
-@dataclass(frozen=True)
-class FeeRates:
-    buy_rate: Decimal = Decimal("0.0033")
-    buy_min: Decimal = Decimal("0.02")
-    sell_rate: Decimal = Decimal("0.0037")
-    sell_min: Decimal = Decimal("0.05")
-
-
-DEFAULT_RATES = FeeRates()
-
-
 def order_value(shares, price) -> Decimal:
     return q2(D(shares) * D(price))
 
 
-def buy_fee(order_val, rates: FeeRates = DEFAULT_RATES) -> Decimal:
-    """Projected buy fee = MAX(min, ROUND(order value x rate, 2))."""
-    return max(rates.buy_min, q2(D(order_val) * rates.buy_rate))
-
-
-def sell_fee(gross, rates: FeeRates = DEFAULT_RATES) -> Decimal:
-    """Projected sell fee = MAX(min, ROUND(gross proceeds x rate, 2))."""
-    return max(rates.sell_min, q2(D(gross) * rates.sell_rate))
-
-
-def total_cost_basis(shares, avg_price, actual_buy_fee: Optional[Decimal] = None,
-                     rates: FeeRates = DEFAULT_RATES) -> Decimal:
-    """Order value + buy fee. A ledger (actual) fee replaces the projection."""
-    ov = order_value(shares, avg_price)
-    fee = q2(actual_buy_fee) if actual_buy_fee is not None else buy_fee(ov, rates)
-    return ov + fee
-
-
-def net_profit(shares, basis, price, rates: FeeRates = DEFAULT_RATES) -> Decimal:
-    """Projected net profit for a full sale at `price`, before tax."""
-    gross = q2(D(shares) * D(price))
-    return (gross - sell_fee(gross, rates)) - D(basis)
-
-
-def breakeven(shares, basis, rates: FeeRates = DEFAULT_RATES) -> Optional[Decimal]:
-    """Lowest whole-cent price whose projected net profit is >= 0, else None."""
-    if rates.sell_rate >= Decimal("1"):
-        raise ValueError("sell_rate must be < 1")
-    shares, basis = D(shares), D(basis)
-    if shares <= 0 or basis <= 0:
-        return None
-    gross_min = basis + rates.sell_min
-    gross_pct = (basis / (Decimal("1") - rates.sell_rate)) if rates.sell_rate > 0 else basis
-    gross_needed = max(gross_min, gross_pct)
-    p = max(CENT, ((gross_needed - Decimal("0.005")) / shares).quantize(CENT, rounding=ROUND_UP))
-    while net_profit(shares, basis, p, rates) < 0:
-        p += CENT
-    # Safety: the start value is meant to be a lower bound; make sure it is, so the
-    # result is always the *first* whole cent (matters for tiny or fractional positions).
-    while p > CENT and net_profit(shares, basis, p - CENT, rates) >= 0:
-        p -= CENT
-    return p
-
-
 def pct_distance(price, base) -> Optional[Decimal]:
-    """Unrounded percent distance of price from base (used for zone decisions)."""
+    """Unrounded percent distance of price from base."""
     base = D(base) if base is not None else None
     if base is None or base <= 0:
         return None
@@ -85,7 +31,6 @@ def pct_distance(price, base) -> Optional[Decimal]:
 
 
 def pct_distance_2dp(price, base) -> Optional[Decimal]:
-    """Rounded to 2 decimals, as the blueprint shows it."""
     p = pct_distance(price, base)
     return None if p is None else q2(p)
 
@@ -99,38 +44,73 @@ def pct_from_price(base, price) -> Optional[Decimal]:
     return pct_distance(price, base)
 
 
-def stock_base(stock, rates: FeeRates = DEFAULT_RATES) -> Optional[Decimal]:
-    """Base for percent math: breakeven (HOLD, SELL) or planned entry (BUY)."""
-    if stock.category in ("HOLD", "SELL"):
-        pos = stock.position
-        if pos is None:
-            return None
-        basis = total_cost_basis(pos.shares, pos.avg_price, pos.actual_buy_fee, rates)
-        return breakeven(pos.shares, basis, rates)
-    if stock.category == "BUY":
-        pe = stock.planned_entry
-        return pe.price if pe is not None and pe.price > 0 else None
-    return None
-
-
-def net_estimate(stock, price, rates: FeeRates = DEFAULT_RATES) -> Optional[Decimal]:
-    if stock.category not in ("HOLD", "SELL") or stock.position is None:
+def effective_buy_price(trade: Optional[TradeInfo]) -> Optional[Decimal]:
+    """User-entered buy_price adjusted by manual fees/shares when both shares & fees are set."""
+    if trade is None or trade.buy_price is None or trade.buy_price <= 0:
         return None
-    pos = stock.position
-    basis = total_cost_basis(pos.shares, pos.avg_price, pos.actual_buy_fee, rates)
-    return net_profit(pos.shares, basis, price, rates)
+    if trade.shares is not None and trade.shares > 0 and trade.fees is not None and trade.fees > 0:
+        return trade.buy_price + (trade.fees / trade.shares)
+    return trade.buy_price
 
 
-def position_summary(stock, price, rates: FeeRates = DEFAULT_RATES) -> dict:
-    """Numbers for the expanded section: cost basis, breakeven, net at price."""
-    pos = stock.position
-    if pos is None:
+def resolve_pct_base(
+    stock: StockConfig,
+    pct_base: str = "auto",
+    prev_close: Optional[Decimal] = None,
+    ref_price: Optional[Decimal] = None,
+) -> tuple[Optional[Decimal], str]:
+    """Resolve the dollar base for a `%` alert condition and return (base_price, base_label)."""
+    trade = stock.trade
+    pc = D(prev_close) if (prev_close is not None and D(prev_close) > 0) else None
+    custom_ref = D(ref_price) if (ref_price is not None and D(ref_price) > 0) else None
+
+    if pct_base == "custom":
+        if custom_ref is not None:
+            return custom_ref, f"ref ${q2(custom_ref):.2f}"
+        if pc is not None:
+            return pc, "prev close"
+        return None, ""
+
+    if pct_base == "prev_close":
+        return (pc, "prev close") if pc is not None else (None, "")
+
+    if pct_base == "sell_price":
+        if trade is not None and trade.sell_price is not None and trade.sell_price > 0:
+            return trade.sell_price, "sell price"
+        return (pc, "prev close") if pc is not None else (None, "")
+
+    # "buy_price" or "auto"
+    if trade is not None and trade.buy_price is not None and trade.buy_price > 0:
+        if stock.category in ("HOLD", "SELL") and trade.shares is not None and trade.shares > 0 and trade.fees is not None and trade.fees > 0:
+            return effective_buy_price(trade), "breakeven"
+        lbl = "entry price" if stock.category == "BUY" else "buy price"
+        return trade.buy_price, lbl
+
+    if pct_base == "auto" and trade is not None and trade.sell_price is not None and trade.sell_price > 0:
+        return trade.sell_price, "sell price"
+
+    if pc is not None:
+        return pc, "prev close"
+    return None, ""
+
+
+def manual_trade_summary(trade: Optional[TradeInfo], price: Optional[Decimal] = None) -> dict:
+    """Summarize simple math solely from user-entered trade fields (never guesses fees)."""
+    if trade is None:
         return {}
-    ov = order_value(pos.shares, pos.avg_price)
-    fee = q2(pos.actual_buy_fee) if pos.actual_buy_fee is not None else buy_fee(ov, rates)
-    basis = ov + fee
-    gross = q2(pos.shares * D(price))
-    return {"order_value": ov, "buy_fee": fee, "cost_basis": basis,
-            "breakeven": breakeven(pos.shares, basis, rates),
-            "sell_fee": sell_fee(gross, rates),
-            "net_estimate": net_profit(pos.shares, basis, price, rates)}
+    out: dict = {}
+    fees = trade.fees or ZERO
+    if trade.buy_price is not None and trade.buy_price > 0:
+        eff = effective_buy_price(trade)
+        out["buy_price"] = trade.buy_price
+        out["cost_per_share"] = eff
+        if trade.shares is not None and trade.shares > 0:
+            out["shares"] = trade.shares
+            out["cost_total"] = q2(trade.buy_price * trade.shares + fees)
+            if price is not None and price > 0:
+                out["live_pnl"] = q2((D(price) - trade.buy_price) * trade.shares - fees)
+            if trade.sell_price is not None and trade.sell_price > 0:
+                out["target_pnl"] = q2((trade.sell_price - trade.buy_price) * trade.shares - fees)
+    elif trade.sell_price is not None and trade.sell_price > 0 and trade.shares is not None and trade.shares > 0:
+        out["sell_total"] = q2(trade.sell_price * trade.shares - fees)
+    return out

@@ -46,7 +46,7 @@ def test_network_outage_ambers_rows_then_recovers_and_old_prices_never_fire(tmp_
     step()                                                              # reconnect: automatic
     assert c.header(clock[0]).feed_dot == "green"
     assert any(e.alert_id == "aapl-target" for n in rec.notes for e in n.events)   # the 212 reading is evaluated once fresh
-    assert c.zone_tag("AAPL") == "High sell zone"
+    assert c.row_views(clock[0])[0].zone_tag == ""
 
 
 def test_rate_limit_backoff_then_degraded_header(tmp_path):

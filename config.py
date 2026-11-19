@@ -1,4 +1,4 @@
-"""config.json loading, defaults, API-budget check, paths (blueprint sections 3, 8.3, 10)."""
+"""config.json loading, defaults, API-budget check, paths."""
 from __future__ import annotations
 
 import json
@@ -12,15 +12,11 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from models import MODES, PRIORITIES, ValidationError
-from positions import FeeRates
-from zones import validate_thresholds
+from models import PRIORITIES
 
 IST = ZoneInfo("Asia/Kolkata")
 MAX_CALLS_PER_MIN = 48          # 80% of the 60/min free-tier limit, PER API KEY
 SLOT_POLL_S = 15                # 15-second slot cadence during regular market hours with 4-key rotation
-ZONE_DEFAULTS_PCT = {"deep_loss": -10, "loss": -3, "sell": 3, "high_sell": 4.5,
-                     "deep_drop": -10, "near_entry": 1, "far_above": 5}
 _KEY_SPLIT = re.compile(r"[,;\s]+")           # keys never contain commas, semicolons or whitespace
 
 
@@ -38,9 +34,7 @@ def max_calls_per_minute(num_keys: int = 1) -> int:
 
 
 def check_budget(symbols: int, poll_seconds: int, num_keys: int = 1) -> Decimal:
-    """Refuse any setting above 48 calls/min per key.
-    1 key:  30 symbols at 60 s = 31 (ok); at 30 s = 62 (refused).
-    4 keys: ceiling is 192, so 30 symbols at 15 s = 124 (ok)."""
+    """Refuse any setting above 48 calls/min per key."""
     if poll_seconds <= 0:
         raise BudgetError("poll_seconds must be above 0.")
     max_cpm = max_calls_per_minute(num_keys)
@@ -62,12 +56,7 @@ class Config:
     poll_seconds: int = 60
     stale_after_seconds: int = 180
     max_symbols: int = 30
-    rates: FeeRates = FeeRates()
-    zone_band_standard: Decimal = Decimal("0.5")
-    zone_band_noisy: Decimal = Decimal("1.0")
     level_rearm_band_pct: Decimal = Decimal("0.5")
-    level_alert_mode: str = "rearm"
-    cooldown_min: int = 30
     default_priority: str = "MEDIUM"
     pop_seconds: int = 10
     escalation_seconds: int = 120
@@ -76,10 +65,7 @@ class Config:
     quiet_hours_ist: Optional[tuple] = None      # (start, end) as datetime.time
     hotkeys_enabled: bool = True
     extended_hours: bool = True
-    zone_defaults: dict = field(default_factory=lambda: dict(ZONE_DEFAULTS_PCT))
-    look: dict = field(default_factory=dict)     # desktop-layer look settings (Step B)
-    # Finnhub keys from config.json (plaintext fallback; the environment wins). repr=False so a
-    # logged Config can never print a key.
+    look: dict = field(default_factory=dict)     # desktop-layer look settings
     api_keys: list = field(default_factory=list, repr=False)
     num_keys: int = 1
 
@@ -89,9 +75,9 @@ def _dec(v) -> Decimal:
         raise ValueError("expected a number")
     try:
         d = v if isinstance(v, Decimal) else Decimal(str(v))
-    except ArithmeticError:                      # decimal.InvalidOperation: "abc", "", ...
+    except ArithmeticError:
         raise ValueError("expected a number")
-    if not d.is_finite():                        # NaN / Infinity would poison every comparison
+    if not d.is_finite():
         raise ValueError("expected a finite number")
     return d
 
@@ -129,7 +115,6 @@ def _parse_quiet(v):
 
 
 def _split_keys(raw) -> list:
-    """'k1, "k2" ;k3' -> ['k1', 'k2', 'k3']. Cleaned, empties dropped, duplicates removed, order kept."""
     if not isinstance(raw, str):
         return []
     out = []
@@ -141,8 +126,6 @@ def _split_keys(raw) -> list:
 
 
 def _parse_api_keys(v) -> list:
-    """config.json "api_keys": a list of strings (or one comma-separated string). Error messages
-    never contain a key value, because load_config shows them on the widget."""
     if v is None:
         return []
     if isinstance(v, str):
@@ -161,43 +144,16 @@ def _parse_api_keys(v) -> list:
 
 def parse_config(d: dict, num_env_keys: int = 0) -> Config:
     """Raises ValueError with a readable message when anything is wrong.
-    num_env_keys: how many keys the environment already supplies. They win over config.json, so the
-    budget check counts them instead of the "api_keys" list."""
+    Legacy keys (`fees`, `zone_band`, `zone_defaults`, `level_alert_mode`, `cooldown_min`)
+    are silently ignored so existing config.json files continue to load cleanly."""
     if not isinstance(d, dict):
         raise ValueError("top level must be an object")
-    f = _obj(d, "fees")
-    rates = FeeRates(
-        buy_rate=_dec(f.get("buy_rate_pct", Decimal("0.33"))) / 100,
-        buy_min=_dec(f.get("buy_min", Decimal("0.02"))),
-        sell_rate=_dec(f.get("sell_rate_pct", Decimal("0.37"))) / 100,
-        sell_min=_dec(f.get("sell_min", Decimal("0.05"))))
-    if not (0 <= rates.buy_rate < 1 and 0 <= rates.sell_rate < 1 and rates.buy_min >= 0 and rates.sell_min >= 0):
-        raise ValueError("fee rates/minimums out of range")
-    zb = _obj(d, "zone_band")
-    band_standard = _dec(zb.get("standard", "0.5"))
-    band_noisy = _dec(zb.get("noisy", "1.0"))
-    if band_standard < 0:
-        raise ValueError("zone_band.standard must be >= 0")
-    if band_noisy < 0:
-        raise ValueError("zone_band.noisy must be >= 0")
     rearm_band = _dec(d.get("level_rearm_band_pct", "0.5"))
     if not (Decimal(0) <= rearm_band < Decimal(100)):
         raise ValueError("level_rearm_band_pct must be between 0 and 100")
-    zd = dict(ZONE_DEFAULTS_PCT)
-    zd.update({k: _dec(v) for k, v in _obj(d, "zone_defaults").items() if k in zd})
-    try:
-        zd_dec = {k: _dec(v) for k, v in zd.items()}
-        zd_errs = validate_thresholds("SELL", zd_dec) + validate_thresholds("BUY", zd_dec)
-    except ValidationError as exc:
-        raise ValueError(str(exc)) from exc
-    if zd_errs:
-        raise ValueError("zone_defaults invalid: " + " ".join(zd_errs))
-    mode = d.get("level_alert_mode", "rearm")
     prio = d.get("default_priority", "MEDIUM")
-    if mode not in MODES:
-        raise ValueError("level_alert_mode must be once, rearm or repeat")
     if prio not in PRIORITIES:
-        raise ValueError("default_priority must be LOW, MEDIUM or HIGH")
+        raise ValueError("default_priority must be LOW, MEDIUM, HIGH or CUSTOM")
     api_keys = _parse_api_keys(d.get("api_keys"))
     num_keys = max(1, num_env_keys if num_env_keys > 0 else max(1, len(api_keys)))
     default_poll = 15 if num_keys >= 4 else 60
@@ -209,22 +165,26 @@ def parse_config(d: dict, num_env_keys: int = 0) -> Config:
     cfg = Config(
         poll_seconds=poll_s,
         stale_after_seconds=_int(d, "stale_after_seconds", 180),
-        max_symbols=_int(d, "max_symbols", 30), rates=rates,
-        zone_band_standard=band_standard, zone_band_noisy=band_noisy,
-        level_rearm_band_pct=rearm_band, level_alert_mode=mode,
-        cooldown_min=_int(d, "cooldown_min", 30), default_priority=prio,
-        pop_seconds=_int(d, "pop_seconds", 10), escalation_seconds=_int(d, "escalation_seconds", 120),
-        sound=_bool(d, "sound", True), toast=_bool(d, "toast", True),
+        max_symbols=_int(d, "max_symbols", 30),
+        level_rearm_band_pct=rearm_band,
+        default_priority=prio,
+        pop_seconds=_int(d, "pop_seconds", 10),
+        escalation_seconds=_int(d, "escalation_seconds", 120),
+        sound=_bool(d, "sound", True),
+        toast=_bool(d, "toast", True),
         quiet_hours_ist=_parse_quiet(d.get("quiet_hours_ist")),
-        hotkeys_enabled=_bool(d, "hotkeys_enabled", True), extended_hours=_bool(d, "extended_hours", True),
-        zone_defaults=zd, look=dict(_obj(d, "look")), api_keys=api_keys, num_keys=num_keys)
+        hotkeys_enabled=_bool(d, "hotkeys_enabled", True),
+        extended_hours=_bool(d, "extended_hours", True),
+        look=dict(_obj(d, "look")),
+        api_keys=api_keys,
+        num_keys=num_keys,
+    )
     check_budget(cfg.max_symbols, cfg.poll_seconds, num_keys=cfg.num_keys)
     return cfg
 
 
 def load_config(path: Path, num_env_keys: int = 0):
-    """Returns (Config, warnings). Missing file -> defaults, no warning. Invalid -> defaults + warning.
-    num_env_keys is passed through to parse_config (keys that come from the environment)."""
+    """Returns (Config, warnings). Missing file -> defaults, no warning. Invalid -> defaults + warning."""
     path = Path(path)
     num_keys = max(1, int(num_env_keys))
     default_poll = 15 if num_keys >= 4 else 60
@@ -233,7 +193,7 @@ def load_config(path: Path, num_env_keys: int = 0):
     try:
         data = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal)
         return parse_config(data, num_env_keys=num_env_keys), []
-    except Exception as exc:  # any problem: built-in defaults, shown on the widget
+    except Exception as exc:
         return Config(poll_seconds=default_poll, num_keys=num_keys), [f"config.json is invalid ({exc}); using built-in defaults."]
 
 
@@ -257,8 +217,6 @@ def data_dir(override: Optional[Path] = None) -> Path:
 
 
 def clean_api_key(raw) -> Optional[str]:
-    """Trim whitespace and stray quotes (e.g. from `setx FINNHUB_API_KEY "abc "`). Returns None when
-    nothing is left, so an empty or quotes-only value counts as unset. Never log this value."""
     if not isinstance(raw, str):
         return None
     key = raw.strip().strip('"\'').strip()
@@ -266,18 +224,11 @@ def clean_api_key(raw) -> Optional[str]:
 
 
 def get_api_key(environ: Optional[dict[str, str]] = None) -> Optional[str]:
-    """Read from the environment only. Never log, print or write this value.
-    Kept for backward compatibility; the pool uses get_api_keys()."""
     env = os.environ if environ is None else environ
     return clean_api_key(env.get("FINNHUB_API_KEY"))
 
 
 def get_api_keys(environ: Optional[dict[str, str]] = None) -> list[str]:
-    """Every Finnhub key found in FINNHUB_API_KEY, FINNHUB_API_KEYS, or numbered variables
-    FINNHUB_API_KEY_1 through FINNHUB_API_KEY_10. Any may hold several keys separated by commas,
-    e.g. "key1, key2, key3, key4". Each key is cleaned like clean_api_key(); empties and
-    duplicates are dropped; order is kept. [] when nothing is set.
-    Never log, print or write these values."""
     env = os.environ if environ is None else environ
     keys: list[str] = []
     names = ["FINNHUB_API_KEY", "FINNHUB_API_KEYS"] + [f"FINNHUB_API_KEY_{i}" for i in range(1, 11)]

@@ -15,7 +15,7 @@ import pytest
 from app_core import AppController
 from config import Config, parse_config
 from data_checks import IGNORED, PriceFilter
-from engine import AlertEngine, Notification
+from engine import AlertEngine, Notification, resolve_alert_targets
 from market_clock import ET, MarketCalendar, Session
 import main as main_mod
 from messages import format_message
@@ -23,14 +23,15 @@ from models import (
     ARMED,
     Alert,
     AlertEvent,
-    Position,
     PriceTick,
     StockConfig,
+    TradeInfo,
     ValidationError,
     Watchlist,
+    resolve_notification_spec,
 )
 from notifier import Notifier, NullBackends
-from positions import CENT, FeeRates, breakeven, net_profit
+from positions import CENT, effective_buy_price, resolve_pct_base
 from providers.finnhub import FinnhubProvider
 from providers.mock import MockProvider
 from providers.base import NetworkFailure, ProviderError, RateLimited
@@ -41,7 +42,6 @@ from ui.editor import AddStockDialog, AlertDialog, ChoiceDialog, StockEditor
 from ui.mini_tracker import MiniTrackerSettingsDialog, MiniTrackerWindow
 from ui.widget import IDLE_EDIT_S, WidgetView
 from watchlist import parse_alert, parse_stock, parse_watchlist
-from zones import build_zone_defs, zone_price_table
 
 
 T0 = datetime(2026, 10, 14, 15, 0, tzinfo=timezone.utc)  # Wednesday 11:00 ET (REGULAR)
@@ -156,10 +156,13 @@ def tk_root(_tk_mod_root):
 
 
 def _make_stock(sym: str, cat: str = "SELL") -> StockConfig:
-    pos = Position(Decimal("10"), Decimal("200")) if cat in ("HOLD", "SELL") else None
-    from models import PlannedEntry
-    ent = PlannedEntry(Decimal("190")) if cat == "BUY" else None
-    return StockConfig(sym, cat, sym, position=pos, planned_entry=ent)
+    if cat in ("HOLD", "SELL"):
+        tr = TradeInfo(buy_price=Decimal("200"), shares=Decimal("10"))
+    elif cat == "BUY":
+        tr = TradeInfo(buy_price=Decimal("190"))
+    else:
+        tr = None
+    return StockConfig(sym, cat, sym, trade=tr)
 
 
 def _setup_controller(tmp_path: Path, stocks: list[StockConfig], *, now=T0, session_override=Session.REGULAR):
@@ -235,36 +238,37 @@ def test_h1_scheduler_never_returns_zero_on_errors_outside_active_hours():
             assert delay_reg >= 1.0
 
 
-# ---- H2: Inactive session updates display without mutating zone state -----------------------
-def test_h2_inactive_sessions_preserve_zones_until_active_open():
+# ---- H2: Inactive session updates display without mutating alert state ----------------------
+def test_h2_inactive_sessions_preserve_alert_state_until_active_open():
     stock = _make_stock("AAPL", "SELL")
+    stock.alerts = [Alert("t1", operator="less_than", value=Decimal("195"), trigger="once", priority="HIGH", label="RISK")]
     engine = AlertEngine(Config())  # extended_hours=True
     t_reg1 = T0
-    # First reading in REGULAR puts AAPL into 'sell' zone (~+5% vs 200.81 BE -> ~210)
     assert engine.process_tick(stock, _tick("AAPL", "210", t=t_reg1), t_reg1, Session.REGULAR) == []
-    assert engine.sym_state("AAPL")["zone"] == "sell"
+    assert engine.alert_state("AAPL", "t1")["state"] == ARMED
 
-    # CLOSED session pushes 194 (which would be 'loss' zone): updates last_price, NOT zone
+    # CLOSED session pushes 194 (which would trigger t1): updates last_price, NOT alert state
     t_closed = t_reg1 + timedelta(minutes=1)
     assert engine.process_tick(stock, _tick("AAPL", "194", t=t_closed), t_closed, Session.CLOSED) == []
     assert engine.sym_state("AAPL")["last_price"] == "194"
-    assert engine.sym_state("AAPL")["zone"] == "sell"
+    assert engine.alert_state("AAPL", "t1")["state"] == ARMED
 
-    # Next ACTIVE reading sees sell -> loss transition and fires zone:loss
+    # Next ACTIVE reading evaluates condition and fires t1
     t_reg2 = t_closed + timedelta(minutes=1)
     evs = engine.process_tick(stock, _tick("AAPL", "194", t=t_reg2), t_reg2, Session.REGULAR)
-    assert any(e.alert_id == "zone:loss" for e in evs)
+    assert [e.alert_id for e in evs] == ["t1"]
 
     # Same with extended_hours=False during PRE/AFTER
+    stock2 = _make_stock("AAPL", "SELL")
+    stock2.alerts = [Alert("t1", operator="less_than", value=Decimal("195"), trigger="once", priority="HIGH", label="RISK")]
     eng_reg = AlertEngine(Config(extended_hours=False))
-    eng_reg.process_tick(stock, _tick("AAPL", "210", t=t_reg1), t_reg1, Session.REGULAR)
-    assert eng_reg.sym_state("AAPL")["zone"] == "sell"
-    assert eng_reg.process_tick(stock, _tick("AAPL", "194", t=t_closed), t_closed, Session.PRE) == []
-    assert eng_reg.process_tick(stock, _tick("AAPL", "194", t=t_closed), t_closed, Session.AFTER) == []
-    assert eng_reg.sym_state("AAPL")["zone"] == "sell"
+    eng_reg.process_tick(stock2, _tick("AAPL", "210", t=t_reg1), t_reg1, Session.REGULAR)
+    assert eng_reg.process_tick(stock2, _tick("AAPL", "194", t=t_closed), t_closed, Session.PRE) == []
+    assert eng_reg.process_tick(stock2, _tick("AAPL", "194", t=t_closed), t_closed, Session.AFTER) == []
+    assert eng_reg.alert_state("AAPL", "t1")["state"] == ARMED
     assert eng_reg.sym_state("AAPL")["ah_price"] == "194"
-    evs2 = eng_reg.process_tick(stock, _tick("AAPL", "194", t=t_reg2), t_reg2, Session.REGULAR)
-    assert any(e.alert_id == "zone:loss" for e in evs2)
+    evs2 = eng_reg.process_tick(stock2, _tick("AAPL", "194", t=t_reg2), t_reg2, Session.REGULAR)
+    assert [e.alert_id for e in evs2] == ["t1"]
 
 
 # ---- H3: server_down resets on ticks ---------------------------------------------------------
@@ -318,7 +322,7 @@ def test_h4_m1_notifier_latest_before_flash_listeners_and_high_preservation():
     assert len(listener_calls) == 3
     assert esc_handle in timers.cancelled
     popups_before = len(backends.popups)
-    notifier._escalate(pending)
+    notifier._escalate(pending, resolve_notification_spec("HIGH"))
     assert len(backends.popups) == popups_before
 
 
@@ -366,19 +370,20 @@ def test_h5_single_open_dialog_guards_and_cleanup(tmp_path, tk_root):
             view.exit_edit()
 
 
-# ---- H6: breakeven precision + sell_rate guard ----------------------------------------------
-def test_h6_breakeven_tiny_shares_and_sell_rate_guard():
+# ---- H6: manual trade effective_buy_price precision & WATCH prev_close fallback -------------
+def test_h6_manual_trade_effective_buy_tiny_shares_and_watch_fallback():
     t0 = time.monotonic()
-    p = breakeven(Decimal("0.00001"), Decimal("10"))
+    tr = TradeInfo(buy_price=Decimal("100.00"), shares=Decimal("0.00001"), fees=Decimal("0.0001"))
+    p = effective_buy_price(tr)
     elapsed = time.monotonic() - t0
     assert elapsed < 0.5
-    assert p is not None
-    assert net_profit(Decimal("0.00001"), Decimal("10"), p) >= 0
-    if p > CENT:
-        assert net_profit(Decimal("0.00001"), Decimal("10"), p - CENT) < 0
+    assert p == Decimal("110.00")
 
-    with pytest.raises(ValueError, match="sell_rate"):
-        breakeven(Decimal("10"), Decimal("100"), FeeRates(sell_rate=Decimal("1")))
+    w = _make_stock("MSFT", "WATCH")
+    base, desc = resolve_pct_base(w, "auto", prev_close=Decimal("198.00"))
+    assert base == Decimal("198.00") and desc
+    base_missing, _ = resolve_pct_base(w, "auto", prev_close=None)
+    assert base_missing is None
 
 
 # ---- H7 & H8: update_stock session + quote_listener dispatch --------------------------------
@@ -397,7 +402,7 @@ def test_h7_h8_update_stock_respects_closed_session_and_notifies_listeners(tmp_p
 
     # Add immediately-true alert via update_stock during Session.CLOSED with choice='fire_now'
     msft = ctrl.stock("MSFT")
-    msft.alerts.append(Alert("m1", "level_above", "WATCH", "HIGH", mode="once", price=Decimal("390")))
+    msft.alerts.append(Alert("m1", operator="greater_than", value=Decimal("390"), trigger="once", priority="HIGH", label="WATCH"))
     ctrl.update_stock(msft, choices={"m1": "fire_now"})
     assert len(listener_calls) == 3
     assert backends.popups == []
@@ -588,12 +593,12 @@ def test_m4_m5_mini_tracker_sync_drag_wm_delete_and_no_false_badge(tmp_path, tk_
             view.mini.destroy()
 
 
-# ---- M6, M7, M8: COOLDOWN + noisy, NaN -> IGNORED, exact-cent zone boundaries ----------------
-def test_m6_m7_m8_cooldown_noisy_nan_ignored_and_exact_cent_zones():
+# ---- M6, M7, M8: COOLDOWN + noisy, NaN -> IGNORED, exact pct target resolution ----------------
+def test_m6_m7_m8_cooldown_noisy_nan_ignored_and_exact_pct_targets():
     # M6: COOLDOWN expiry with noisy=True still needs 2 readings
     stock = StockConfig("AAPL", "WATCH", noisy=True,
-                        alerts=[Alert("rep", "level_above", "WATCH", "MEDIUM", mode="repeat",
-                                      price=Decimal("200"), cooldown_min=5)])
+                        alerts=[Alert("rep", operator="greater_than", value=Decimal("200"),
+                                      trigger="every_time", label="WATCH", priority="MEDIUM", cooldown_min=5)])
     eng = AlertEngine(Config())
     assert [e.alert_id for e in eng.process_tick(stock, _tick("AAPL", "205", t=T0), T0, Session.REGULAR)] == []
     assert [e.alert_id for e in eng.process_tick(stock, _tick("AAPL", "205", t=T0), T0, Session.REGULAR)] == ["rep"]
@@ -610,60 +615,46 @@ def test_m6_m7_m8_cooldown_noisy_nan_ignored_and_exact_cent_zones():
     assert pf.submit(Decimal("-Infinity")) == IGNORED
     assert pf.submit("100") == IGNORED  # type: ignore[arg-type]
 
-    # M8: zone_price_table non-overlapping cent boundaries at base=100.00
-    s_sell = _make_stock("AAPL", "SELL")
-    defs = build_zone_defs(s_sell, Config().zone_defaults)
-    table = {r["name"]: r for r in zone_price_table(defs, Decimal("100.00"))}
-    assert table["loss"]["hi_price"] == Decimal("97.00")
-    assert table["below_be"]["lo_price"] == Decimal("97.01")
-    assert table["below_be"]["hi_price"] == Decimal("99.49")
-    assert table["breakeven"]["lo_price"] == Decimal("99.50")
-    assert table["breakeven"]["hi_price"] == Decimal("100.50")
-    assert table["above_be"]["lo_price"] == Decimal("100.51")
-    assert table["above_be"]["hi_price"] == Decimal("102.99")
-    assert table["sell"]["lo_price"] == Decimal("103.00")
-    assert table["sell"]["hi_price"] == Decimal("104.49")
-    assert table["high_sell"]["lo_price"] == Decimal("104.50")
+    # M8: resolve_alert_targets exact 2dp resolution for pct single & channel bounds at buy=100.00
+    s_sell = StockConfig("AAPL", "SELL", trade=TradeInfo(buy_price=Decimal("100.00"), shares=Decimal("10")))
+    single_a = Alert("p1", operator="greater_than", condition_mode="pct", value=Decimal("3.0"))
+    single, bounds, _, _ = resolve_alert_targets(s_sell, single_a)
+    assert single == Decimal("103.00") and bounds is None
+
+    chan_a = Alert("c1", operator="entering_channel", condition_mode="pct", lower=Decimal("-3.0"), upper=Decimal("4.5"))
+    single2, bounds2, _, _ = resolve_alert_targets(s_sell, chan_a)
+    assert single2 is None and bounds2 == (Decimal("97.00"), Decimal("104.50"))
 
 
 # ---- M9: Validation guards in parse_config, parse_alert, parse_stock ------------------------
 def test_m9_validation_guards():
     with pytest.raises(ValueError):
-        parse_config({"zone_band": {"standard": -0.1}})
-    with pytest.raises(ValueError):
-        parse_config({"zone_band": {"noisy": -1}})
-    with pytest.raises(ValueError):
         parse_config({"level_rearm_band_pct": 100})
     with pytest.raises(ValueError):
         parse_config({"level_rearm_band_pct": -0.5})
     with pytest.raises(ValueError):
-        parse_config({"zone_defaults": {"sell": 10, "high_sell": 5}})
+        parse_config({"default_priority": "URGENT"})
 
     cfg = Config()
     st_sell = _make_stock("AAPL", "SELL")
-    st_watch = _make_stock("MSFT", "WATCH")
 
     with pytest.raises(ValidationError):
-        parse_alert({"id": "a1", "type": "level_above", "price": float("nan")}, st_sell, cfg)
+        parse_alert({"id": "a1", "operator": "greater_than", "value": float("nan")}, st_sell, cfg)
     with pytest.raises(ValidationError):
-        parse_alert({"id": "a1", "type": "pct_move_day", "price": 100, "pct": 5}, st_sell, cfg)
+        parse_alert({"id": "a1", "operator": "moving_up_pct", "value": 0}, st_sell, cfg)
     for bad_cd in (True, 5.5, 0, 10081):
         with pytest.raises(ValidationError):
-            parse_alert({"id": "a1", "type": "level_above", "price": 100, "mode": "repeat",
+            parse_alert({"id": "a1", "operator": "greater_than", "value": 100, "trigger": "every_time",
                          "cooldown_min": bad_cd}, st_sell, cfg)
     with pytest.raises(ValidationError):
-        parse_alert({"id": "z1", "type": "zone_exit", "zone": "near_entry"}, st_sell, cfg)
+        parse_alert({"id": "a1", "operator": "bad_op", "value": 100}, st_sell, cfg)
     with pytest.raises(ValidationError):
-        parse_alert({"id": "z2", "type": "zone_exit", "zone": "sell"}, st_watch, cfg)
+        parse_alert({"id": "c1", "operator": "entering_channel", "lower": 200, "upper": 100}, st_sell, cfg)
 
     with pytest.raises(ValidationError):
-        parse_stock({"symbol": "AAPL", "category": "SELL", "position": "bad"}, cfg)
+        parse_stock({"symbol": "AAPL", "category": "SELL", "trade": "bad"}, cfg)
     with pytest.raises(ValidationError):
-        parse_stock({"symbol": "AAPL", "category": "BUY", "planned_entry": [1]}, cfg)
-    with pytest.raises(ValidationError):
-        parse_stock({"symbol": "AAPL", "category": "WATCH", "zones": "bad"}, cfg)
-    with pytest.raises(ValidationError):
-        parse_stock({"symbol": "AAPL", "category": "WATCH", "zones": {"sell": "bad"}}, cfg)
+        parse_stock({"symbol": "AAPL", "category": "SELL", "trade": {"shares": 0}}, cfg)
     with pytest.raises(ValidationError):
         parse_stock({"symbol": "AAPL", "category": "WATCH", "alerts": "not_list"}, cfg)
 
@@ -800,13 +791,13 @@ def test_l1_to_l8_regressions(tmp_path, monkeypatch, tk_root):
     finally:
         dlg.destroy()
 
-    # L6: condition rounds level via q2(lvl)
+    # L6: condition formats rounded target cleanly
     eng = AlertEngine(Config())
-    stk = StockConfig("AAPL", "WATCH", alerts=[Alert("l1", "level_above", "WATCH", "HIGH",
-                                                      mode="once", price=Decimal("100.126"))])
+    stk = StockConfig("AAPL", "WATCH", alerts=[Alert("l1", operator="greater_than", value=Decimal("100.126"),
+                                                      trigger="once", label="WATCH", priority="HIGH")])
     assert eng.process_tick(stk, _tick("AAPL", "99"), T0, Session.REGULAR) == []
     evs = eng.process_tick(stk, _tick("AAPL", "101"), T0, Session.REGULAR)
-    assert evs and evs[0].condition == "at or above 100.13"
+    assert evs and "100.13" in evs[0].condition
 
     # L8: housekeeping triggers poll_now() on session transition
     polled = []
@@ -1425,7 +1416,7 @@ def test_mini_tracker_in_place_refresh_tooltip_and_double_click(tmp_path, tk_roo
         win.refresh()
         win.update()
         expected_tip = view._mini_alert_tooltip()
-        assert expected_tip and "TEST" in expected_tip
+        assert expected_tip and "test" in expected_tip.lower()
         assert win._alerting is True
 
         win.center.event_generate("<Enter>")
@@ -1521,21 +1512,30 @@ def test_audit_4_4_popup_wraplength_and_multimonitor_dialog_placement(tmp_path, 
     anchor.geometry("200x100+2200+120")
     anchor.update()
 
-    # AlertPopup: wraplength=460 on headline and centered inside mocked multi-monitor work area
+    # AlertPopup: wraplength=460 on labels and centered both X & Y inside mocked multi-monitor work area
     popup = AlertPopup(anchor)
     try:
         long_headline = "AAPL " + ("LONGHEADLINE " * 12)
         popup.show(f"{long_headline}\nDetail line", "HIGH", 10, lambda: None)
         popup.win.update()
-        labels = [w for w in popup.win.winfo_children() if isinstance(w, tk.Label)]
-        assert int(labels[0].cget("wraplength")) == 460
+
+        def _all_labels(widget):
+            out = []
+            for ch in widget.winfo_children():
+                if isinstance(ch, tk.Label):
+                    out.append(ch)
+                out.extend(_all_labels(ch))
+            return out
+
+        labels = _all_labels(popup.win)
+        assert any(int(lbl.cget("wraplength")) == 460 for lbl in labels)
         px, py = popup.win.winfo_x(), popup.win.winfo_y()
         pw, ph = popup.win.winfo_reqwidth(), popup.win.winfo_reqheight()
         assert popup_points
         assert 1920 <= px <= 3840 - pw
         assert 0 <= py <= 1040 - ph
         assert abs(px - (1920 + (1920 - pw) // 2)) <= 2
-        assert py == 60
+        assert abs(py - (0 + (1040 - ph) // 2)) <= 2
     finally:
         popup.close()
 
@@ -1543,7 +1543,6 @@ def test_audit_4_4_popup_wraplength_and_multimonitor_dialog_placement(tmp_path, 
     ctrl, _, _, _ = _setup_controller(tmp_path, [_make_stock("AAPL", "SELL")])
     ctrl.on_ticks([_tick("AAPL", "205")], T0)
     ed = StockEditor(tk_root, ctrl, "AAPL", lambda: T0, lambda: None, lambda: None)
-    ctx = ed._context()
 
     anchor.geometry("200x100+3800+1000")
     anchor.update()
@@ -1557,7 +1556,7 @@ def test_audit_4_4_popup_wraplength_and_multimonitor_dialog_placement(tmp_path, 
     finally:
         choice.destroy()
 
-    alert_dlg = AlertDialog(anchor, ctx, None, lambda _a, _c: None)
+    alert_dlg = AlertDialog(anchor, ctrl, "AAPL", None, lambda _s, _a, _c: None)
     try:
         alert_dlg.update()
         aw, ah = alert_dlg.winfo_reqwidth(), alert_dlg.winfo_reqheight()
@@ -1588,17 +1587,55 @@ def test_audit_4_4_popup_wraplength_and_multimonitor_dialog_placement(tmp_path, 
     assert editor_points
 
 
-def test_audit_4_5_stock_editor_hysteresis_label_and_noisy_toggle(tmp_path, tk_root):
+def test_popup_parses_stock_alert_and_centers_with_make_popup_window(tk_root, monkeypatch):
+    parsed = popup_mod._parse_popup_text(
+        "[HIGH] TTWO · Test Alert · $216.33 · 20:08 IST (RH)\n"
+        "Test notification (popup, toast & alarm)\n"
+        "Source Test, data age 0 s.",
+        "HIGH",
+    )
+    assert parsed["is_stock"] is True
+    assert parsed["symbol"] == "TTWO"
+    assert parsed["name"] == "Test Alert"
+    assert parsed["price"] == "$216.33"
+    assert parsed["time_text"] == "20:08 IST · RH"
+    assert parsed["body_lines"] == ["Test notification (popup, toast & alarm)"]
+    assert parsed["source_line"] == "Test · 0 s"
+
+    if sys.platform == "win32":
+        import desktop_layer as dl
+        monkeypatch.setattr(popup_mod, "work_area_for_point", lambda _x, _y: (0, 0, 1920, 1080))
+        popup = AlertPopup(tk_root, make_window=dl.make_popup_window)
+        try:
+            popup.show(
+                "[HIGH] TTWO · Test Alert · $216.33 · 20:08 IST (RH)\n"
+                "Test notification (popup, toast & alarm)\n"
+                "Source Test, data age 0 s.",
+                "HIGH",
+                10,
+                lambda: None,
+            )
+            popup.win.update()
+            px, py = popup.win.winfo_x(), popup.win.winfo_y()
+            pw, ph = popup.win.winfo_reqwidth(), popup.win.winfo_reqheight()
+            assert (px, py) != (0, 0)
+            assert abs(px - (1920 - pw) // 2) <= 2
+            assert abs(py - (1080 - ph) // 2) <= 2
+        finally:
+            popup.close()
+
+
+def test_audit_4_5_stock_editor_trade_info_and_noisy_toggle(tmp_path, tk_root):
     st = Store(tmp_path)
-    cfg = Config(zone_band_standard=Decimal("0.5"), zone_band_noisy=Decimal("1.0"))
+    cfg = Config()
     st.save_watchlist(Watchlist(symbols=[_make_stock("AAPL", "SELL")]), cfg)
     notifier = Notifier(cfg, _SpyBackends(), _MemTimers(), lambda: T0)
     ctrl = AppController(cfg, st, MockProvider({}), notifier, now_fn=lambda: T0, session_override=Session.REGULAR)
 
     ed = StockEditor(tk_root, ctrl, "AAPL", lambda: T0, lambda: None, lambda: None)
-    assert ed.lbl_hysteresis is not None and ed.lbl_hysteresis.winfo_exists()
-    txt0 = ed.lbl_hysteresis.cget("text")
-    assert "±0.5% active" in txt0 and "standard ±0.5%" in txt0 and "noisy ±1.0%" in txt0
+    assert ed.lbl_info is not None and ed.lbl_info.winfo_exists()
+    assert Decimal(ed.v_buy.get()) == Decimal("200")
+    assert Decimal(ed.v_shares.get()) == Decimal("10")
 
     # Find the "Noisy stock..." Checkbutton and invoke it to test live command wiring
     noisy_cb = [
@@ -1607,20 +1644,9 @@ def test_audit_4_5_stock_editor_hysteresis_label_and_noisy_toggle(tmp_path, tk_r
     ][0]
     noisy_cb.invoke()
     assert ed.v_noisy.get() is True
-    assert "±1.0% active" in ed.lbl_hysteresis.cget("text")
 
     noisy_cb.invoke()
     assert ed.v_noisy.get() is False
-    assert "±0.5% active" in ed.lbl_hysteresis.cget("text")
-
-    # WATCH hides hysteresis label; BUY restores it
-    ed.v_cat.set("WATCH")
-    ed._on_category()
-    assert ed.lbl_hysteresis is None
-
-    ed.v_cat.set("BUY")
-    ed._on_category()
-    assert ed.lbl_hysteresis is not None and ed.lbl_hysteresis.winfo_exists()
 
 
 def test_audit_5_4_build_runtime_key_pool_info_and_status_dialog(tmp_path, tk_root):
@@ -1748,10 +1774,10 @@ def test_item_6_2_send_test_alert_and_edit_panel_button(tmp_path, tk_root):
     assert len(backends.popups) == 1
     pop_text, pop_prio, _, _ = backends.popups[0]
     assert pop_prio == "HIGH"
-    assert "TEST" in pop_text and "AAPL" in pop_text and "205.00" in pop_text
+    assert "test" in pop_text.lower() and "AAPL" in pop_text and "205.00" in pop_text
     assert len(backends.toasts) == 1
-    assert "TEST" in backends.toasts[0][0] and backends.toasts[0][1] is True
-    assert backends.beeps == ["high"]
+    assert "test" in backends.toasts[0][0].lower() and backends.toasts[0][1] is True
+    assert backends.beeps == ["alarm"]
     assert backends.flashes == [("AAPL", 2000)]
     assert ctrl.engine.state == before_state
     assert not st.alert_log_path.exists()
@@ -1770,9 +1796,9 @@ def test_item_6_2_send_test_alert_and_edit_panel_button(tmp_path, tk_root):
         test_btn = [w for w in view.panel.winfo_children()[0].winfo_children() if w.cget("text") == "Test Alert"][0]
         test_btn.invoke()
         assert len(backends.popups) == 1
-        assert backends.popups[0][1] == "HIGH" and "TEST" in backends.popups[0][0]
-        assert len(backends.toasts) == 1 and "TEST" in backends.toasts[0][0]
-        assert backends.beeps == ["high"]
+        assert backends.popups[0][1] == "HIGH" and "test" in backends.popups[0][0].lower()
+        assert len(backends.toasts) == 1 and "test" in backends.toasts[0][0].lower()
+        assert backends.beeps == ["alarm"]
         assert backends.flashes == [("AAPL", 2000)]
         assert ctrl.engine.state == before_state
         assert st.read_alert_log() == []

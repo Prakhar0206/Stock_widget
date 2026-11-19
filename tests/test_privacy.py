@@ -10,9 +10,9 @@ from config import Config
 from engine import AlertEngine
 from market_clock import Session
 from messages import format_message
-from models import Alert, Position, StockConfig, Watchlist
+from models import Alert, StockConfig, TradeInfo, Watchlist
 from store import Store, setup_logging
-from conftest import Feed, lvl
+from conftest import Feed, al
 
 KEY = "TESTKEY_9f8e7d6c5b4a"
 POSITION_FILES = {"watchlist.json", "watchlist.last_good.json"}
@@ -46,9 +46,14 @@ def test_15_no_key_no_position_data_in_written_files(tmp_path, monkeypatch):
     cfg = Config()
     st = Store(tmp_path)
     setup_logging(tmp_path)
-    s = StockConfig("AAPL", "SELL", "Apple", False, Position(Dc("7.31"), Dc("123.456"), Dc("4.77")), None, {},
-                    [lvl("t", "level_above", price="130", mode="once", label="SELL"),
-                     Alert("slip", "zone_exit", "RISK", "MEDIUM", zone="sell")])
+    s = StockConfig(
+        "AAPL",
+        "SELL",
+        "Apple",
+        False,
+        TradeInfo(buy_price=Dc("123.456"), shares=Dc("7.31"), sell_price=Dc("155.89"), fees=Dc("4.77")),
+        [al("t", "greater_than", "130", trigger="once", label="SELL")],
+    )
     st.save_watchlist(Watchlist(1, [s]), cfg)
     e = AlertEngine(cfg, st.load_state())
     f = Feed(e, s)
@@ -60,7 +65,7 @@ def test_15_no_key_no_position_data_in_written_files(tmp_path, monkeypatch):
     import logging
     logging.getLogger("saw.test").info("polled AAPL price 131 ok")
 
-    secrets = ["7.31", "123.456", "4.77", "123.46", "TESTKEY"]
+    secrets = ["7.31", "123.456", "155.89", "4.77", "123.46", "TESTKEY"]
     files = [p for p in tmp_path.rglob("*") if p.is_file()]
     assert {p.name for p in files} >= {"watchlist.json", "state.json", "alerts_log.jsonl", "app.log"}
     assert st.read_alert_log(), "the scenario should have fired alerts"
@@ -70,7 +75,7 @@ def test_15_no_key_no_position_data_in_written_files(tmp_path, monkeypatch):
         if p.name not in POSITION_FILES:
             for sec in secrets:
                 assert sec not in text, f"{sec} found in {p.name}"
-            assert '"shares"' not in text and "avg_price" not in text and "net" not in text.lower().replace("network", ""), p.name
+            assert '"shares"' not in text and "avg_price" not in text and "buy_price" not in text and "sell_price" not in text, p.name
 
 
 # ---- logging redaction filter (defence in depth) ----------------------------------------------------

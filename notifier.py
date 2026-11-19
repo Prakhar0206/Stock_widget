@@ -1,6 +1,6 @@
-"""Delivery rules (blueprint section 7). Backends and timers are injected, so the rules are testable
-without Windows. Mute silences sounds and toasts; a HIGH pop-up still appears (silently), and rows
-and alert log keep updating. Quiet hours (IST): pop-ups still appear but make no sound."""
+"""Delivery rules for shifted Priority tiers (LOW/MEDIUM/HIGH/CUSTOM).
+Backends and timers are injected so rules are testable without Windows.
+"""
 from __future__ import annotations
 
 import logging
@@ -10,10 +10,13 @@ from typing import Callable, Optional
 
 from config import Config, in_quiet_hours
 from messages import format_notification
+from models import CustomNotification, resolve_notification_spec
 
 log = logging.getLogger("saw.notifier")
 FLASH_MS = 2000
-BEEP_EVERY_MS = 1000
+BEEP_EVERY_MS = 1200
+
+_TONE_RANK = {"none": 0, "chime": 1, "beep": 2, "bell": 3, "alarm": 4}
 
 
 class NullBackends:
@@ -26,14 +29,12 @@ class NullBackends:
 
 
 class WindowsBackends(NullBackends):
-    """Toast via windows-toasts (winotify as fallback), sound via winsound. Every call is guarded:
-    a broken backend must never stop alert evaluation. Toasts are sent from a background thread
-    because winotify can block for about a second, which would freeze the UI and delay alerts."""
+    """Toast via windows-toasts (winotify as fallback), sound via winsound."""
 
     def __init__(self, popup=None, flash_cb=None):
         self._popup, self._flash = popup, flash_cb
         self._toaster = None
-        self._lock = threading.Lock()        # one toast at a time
+        self._lock = threading.Lock()
         self._mode = None
         try:
             import windows_toasts  # noqa: F401
@@ -60,9 +61,9 @@ class WindowsBackends(NullBackends):
                         self._toaster = WindowsToaster("Stock Alert Widget")
                     lines = text.split("\n")
                     fields = lines if len(lines) <= 3 else lines[:2] + ["\n".join(lines[2:])]
-                    kw = {"audio": ToastAudio(silent=True)}         # sound is played by us, not the toast
+                    kw = {"audio": ToastAudio(silent=True)}
                     if stay:
-                        kw["scenario"] = ToastScenario.Alarm        # stays until dismissed
+                        kw["scenario"] = ToastScenario.Alarm
                     self._toaster.show_toast(Toast(fields, **kw))
                 elif self._mode == "wn":
                     from winotify import Notification
@@ -73,9 +74,20 @@ class WindowsBackends(NullBackends):
                 log.warning("toast failed: %s", type(exc).__name__)
 
     def beep(self, kind):
+        if kind == "none":
+            return
         try:
             import winsound
-            winsound.MessageBeep(winsound.MB_ICONHAND if kind == "high" else winsound.MB_ICONASTERISK)
+            sound_map = {
+                "alarm": winsound.MB_ICONHAND,
+                "high": winsound.MB_ICONHAND,
+                "beep": winsound.MB_ICONEXCLAMATION,
+                "medium": winsound.MB_ICONEXCLAMATION,
+                "bell": winsound.MB_ICONASTERISK,
+                "chime": winsound.MB_ICONASTERISK,
+                "low": winsound.MB_ICONASTERISK,
+            }
+            winsound.MessageBeep(sound_map.get(kind, winsound.MB_ICONASTERISK))
         except Exception as exc:
             log.warning("sound failed: %s", type(exc).__name__)
 
@@ -92,15 +104,31 @@ class WindowsBackends(NullBackends):
             self._flash(symbol, ms)
 
 
+def _merge_specs(events: list) -> CustomNotification:
+    specs = [ev.notification or resolve_notification_spec(ev.priority) for ev in events]
+    popup = any(s.popup for s in specs)
+    toast = any(s.toast for s in specs)
+    repeat = any(s.repeat_until_ack for s in specs)
+    sound_seconds = max(s.sound_seconds for s in specs)
+    best_tone = max((s.sound_tone for s in specs), key=lambda t: _TONE_RANK.get(t, 0))
+    return CustomNotification(
+        popup=popup,
+        toast=toast,
+        sound_tone=best_tone,
+        sound_seconds=sound_seconds,
+        repeat_until_ack=repeat,
+    )
+
+
 class Notifier:
     def __init__(self, cfg: Config, backends, timers, now_fn: Callable[[], datetime]):
         """timers: object with schedule(ms, fn) -> handle and cancel(handle)."""
         self.cfg, self.b, self.t, self.now_fn = cfg, backends, timers, now_fn
         self.muted = False
-        self._latest: Optional[dict] = None      # the most recent alert, for Alt+A
+        self._latest: Optional[dict] = None      # most recent unacked alert batch, for Alt+A & Mini pill
         self._pending_high: Optional[dict] = None
         self._listeners: list = []
-        self._beep_h = self._end_h = self._esc_h = None
+        self._beep_h = self._beep_stop_h = self._end_h = self._esc_h = None
 
     def add_listener(self, fn: Callable[[], None]) -> None:
         if fn not in self._listeners:
@@ -119,36 +147,30 @@ class Notifier:
             except Exception:
                 log.exception("notifier listener failed")
 
-    # ---- public ----------------------------------------------------------------------------
     def toggle_mute(self) -> bool:
-        """Muting stops sound at once. A pop-up that is already showing stays (and still closes on
-        its normal timer); it is just silent."""
         self.muted = not self.muted
         if self.muted:
             self._stop_beep()
         return self.muted
 
     def notify(self, note, now: Optional[datetime] = None) -> None:
-        """`note` is an engine Notification (events already ordered by priority)."""
         if now is None:
             now = self.now_fn()
-        prio = note.priority
-        if prio == "LOW":
-            for ev in note.events:                   # every symbol's row flashes for 2 s
-                self.b.flash(ev.symbol, FLASH_MS)
-            return
+        spec = _merge_specs(note.events)
+        eff_prio = "HIGH" if spec.repeat_until_ack else ("MEDIUM" if spec.popup else "LOW")
         text = format_notification(note, now)
+
         prev = self._latest
         unacked_prev = bool(prev and not prev.get("acked"))
         new_count = len(note.events)
-        if unacked_prev and prev.get("priority") == "HIGH" and prio != "HIGH":
+        if unacked_prev and prev.get("priority") == "HIGH" and eff_prio != "HIGH":
             total_count = prev.get("count", 1) + new_count
             self._latest = {
                 "text": text,
                 "priority": "HIGH",
                 "acked": False,
-                "escalated": prev.get("escalated", False),
                 "count": total_count,
+                "spec": spec,
             }
             if self._pending_high is None:
                 self._pending_high = prev
@@ -156,30 +178,46 @@ class Notifier:
             total_count = (prev.get("count", 1) + new_count) if unacked_prev else new_count
             self._latest = {
                 "text": text,
-                "priority": prio,
+                "priority": eff_prio,
                 "acked": False,
-                "escalated": False,
                 "count": total_count,
+                "spec": spec,
             }
-            if prio == "HIGH":
+            if eff_prio == "HIGH":
                 if self._pending_high is not None and self._pending_high is not prev:
                     self._pending_high["acked"] = True
                 self._pending_high = self._latest
             else:
                 self._pending_high = None
 
-        for ev in note.events:                       # every symbol's row flashes for 2 s
+        for ev in note.events:
             self.b.flash(ev.symbol, FLASH_MS)
         self._notify_listeners()
 
         quiet = self.muted or in_quiet_hours(self.cfg, now) or not self.cfg.sound
-        if self.cfg.toast and not self.muted:
-            self.b.toast(text, stay=(prio == "HIGH"), silent=True)
-        if prio == "MEDIUM":
-            if not quiet:
-                self.b.beep("medium")
-            return
-        self._show_high(self._latest, quiet)
+        if spec.toast and self.cfg.toast and not self.muted:
+            self.b.toast(text, stay=spec.repeat_until_ack, silent=True)
+
+        self._deliver_active(self._latest, spec, quiet, schedule_repeat=True)
+
+    def _deliver_active(self, cur: dict, spec: CustomNotification, quiet: bool, schedule_repeat: bool) -> None:
+        self._stop_sound()
+        if spec.popup:
+            self.b.popup_show(cur["text"], cur["priority"], self.cfg.pop_seconds, self.acknowledge_latest)
+            self._end_h = self.t.schedule(self.cfg.pop_seconds * 1000, self._end_popup)
+        if not quiet and spec.sound_tone != "none":
+            if spec.sound_seconds <= 0:
+                self.b.beep(spec.sound_tone)
+            else:
+                self._beep_loop(spec.sound_tone)
+                self._beep_stop_h = self.t.schedule(spec.sound_seconds * 1000, self._stop_beep)
+        if schedule_repeat and spec.repeat_until_ack:
+            if self._esc_h is not None:
+                self.t.cancel(self._esc_h)
+            self._esc_h = self.t.schedule(
+                self.cfg.escalation_seconds * 1000,
+                lambda: self._escalate(cur, spec),
+            )
 
     def acknowledge_latest(self) -> bool:
         cur = self._latest
@@ -196,53 +234,36 @@ class Notifier:
         if self._esc_h is not None:
             self.t.cancel(self._esc_h)
             self._esc_h = None
-        if getattr(self, "_esc_m", None) is not None:
-            self.t.cancel(self._esc_m)
-            self._esc_m = None
         self._notify_listeners()
         return True
 
-    # ---- HIGH ------------------------------------------------------------------------------
-    def _show_high(self, cur, quiet: bool):
-        self._stop_sound()
-        self.b.popup_show(cur["text"], "HIGH", self.cfg.pop_seconds, self.acknowledge_latest)
-        if not quiet:
-            self._beep_loop("high")
-        self._end_h = self.t.schedule(self.cfg.pop_seconds * 1000, self._end_popup)
-        if not cur["escalated"]:                     # a newer HIGH alert replaces the older one's timer
-            if self._esc_h is not None:
-                self.t.cancel(self._esc_h)
-            self._esc_h = self.t.schedule(self.cfg.escalation_seconds * 1000, lambda: self._escalate(cur))
-
-    def _beep_loop(self, kind):
+    def _beep_loop(self, kind: str) -> None:
         if self.muted:
             return
         self.b.beep(kind)
         self._beep_h = self.t.schedule(BEEP_EVERY_MS, lambda: self._beep_loop(kind))
 
-    def _end_popup(self):
+    def _end_popup(self) -> None:
         self._end_h = None
-        self._stop_sound()
-        self.b.popup_close()                         # the toast stays; the widget is back on the desktop
+        self.b.popup_close()
 
-    def _stop_beep(self):
-        if self._beep_h is not None:
-            self.t.cancel(self._beep_h)
-            self._beep_h = None
-
-    def _stop_sound(self):
-        for name in ("_beep_h", "_end_h"):
-            h = getattr(self, name)
+    def _stop_beep(self) -> None:
+        for name in ("_beep_h", "_beep_stop_h"):
+            h = getattr(self, name, None)
             if h is not None:
                 self.t.cancel(h)
                 setattr(self, name, None)
 
-    def _escalate(self, cur):
-        """Not acknowledged: the pop-up repeats once after 2 minutes, then stops."""
+    def _stop_sound(self) -> None:
+        self._stop_beep()
+        if self._end_h is not None:
+            self.t.cancel(self._end_h)
+            self._end_h = None
+
+    def _escalate(self, cur: dict, spec: CustomNotification) -> None:
+        """Auto-repeat persistent alarms every `escalation_seconds` (2 min) until acknowledged."""
         self._esc_h = None
-        if cur["acked"]:
+        if cur.get("acked"):
             return
-        cur["escalated"] = True                      # repeats once, even while muted (silently)
-        if self._latest is not None and not self._latest.get("acked"):
-            self._latest["escalated"] = True
-        self._show_high(cur, self.muted or in_quiet_hours(self.cfg, self.now_fn()) or not self.cfg.sound)
+        quiet = self.muted or in_quiet_hours(self.cfg, self.now_fn()) or not self.cfg.sound
+        self._deliver_active(cur, spec, quiet, schedule_repeat=True)

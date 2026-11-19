@@ -156,7 +156,7 @@ class Store:
         rec = {"time": ev.time.astimezone(timezone.utc).isoformat(timespec="seconds"),
                "symbol": ev.symbol, "alert_id": ev.alert_id, "label": ev.label,
                "priority": ev.priority, "price": str(ev.price),
-               "condition": ev.condition or ev.zone or ev.kind, "source": ev.source}
+               "condition": ev.condition or ev.kind, "source": ev.source}
         line = json.dumps(rec, ensure_ascii=False) + "\n"
         with self._log_lock:
             with open(self.alert_log_path, "a", encoding="utf-8", newline="\n") as f:

@@ -13,14 +13,13 @@ from typing import Callable, Optional
 
 from config import Config
 from data_checks import FeedHealth
-from engine import AlertEngine, Notification, merge_events
+from engine import AlertEngine, Notification, compute_expires_at, merge_events
 from market_clock import ET, IST, MarketCalendar, Session, is_active_session, utcnow
-from models import ARMED, DISABLED, DONE, AlertEvent, PriceTick, StockConfig, ValidationError, Watchlist
+from models import (ARMED, COOLDOWN, DISABLED, DISARMED, DONE, EXPIRED, WAIT_CROSS, Alert, AlertEvent,
+                    PriceTick, StockConfig, ValidationError, Watchlist, resolve_notification_spec)
 from positions import q2
 from scheduler import CLOSED_POLL_S
 from store import Store
-from watchlist import ensure_slipping_alert
-from zones import TAGS
 
 log = logging.getLogger("saw.app")
 
@@ -283,8 +282,10 @@ class AppController:
                         row.ah_price = prev_ah
             if session == Session.REGULAR and t.price > 0 and not row.paused:
                 self.engine.state.setdefault("last_regular", {})[stock.symbol] = {
-                    "price": str(t.price), "prev_close": str(t.prev_close) if t.prev_close else None,
-                    "zone": self.engine.state["symbols"].get(stock.symbol, {}).get("zone"), "time": now.isoformat()}
+                    "price": str(t.price),
+                    "prev_close": str(t.prev_close) if t.prev_close else None,
+                    "time": now.isoformat(),
+                }
         self.dispatch(events)
         self._save_state()
         self._notify_quote_listeners()
@@ -385,8 +386,6 @@ class AppController:
         if self.wl.get(stock.symbol):
             raise ValidationError(f"{stock.symbol} is already in the watchlist.")
         new = copy.deepcopy(stock)
-        if new.category == "SELL":
-            ensure_slipping_alert(new)               # section 5.5: every new SELL stock gets Slipping
         cand = copy.deepcopy(self.wl)
         cand.symbols.append(new)
         self._commit(cand)
@@ -399,8 +398,6 @@ class AppController:
         if old is None:
             raise ValidationError(f"{new.symbol} is not in the watchlist.")
         new = copy.deepcopy(new)
-        if new.category == "SELL" and old.category != "SELL":
-            ensure_slipping_alert(new)               # switched TO sell: add Slipping (an unchanged SELL stock never gets it back)
         cand = copy.deepcopy(self.wl)
         cand.symbols = [new if s.symbol == new.symbol else s for s in cand.symbols]
         self._commit(cand)
@@ -423,6 +420,85 @@ class AppController:
         self.dispatch(events)
         self._save_state()
         self._notify_quote_listeners()
+
+    def save_alert(self, symbol: str, alert: Alert, choice: Optional[str] = None) -> None:
+        """Immediately add or update a single alert on `symbol` and persist atomically."""
+        old = self.wl.get(symbol)
+        if old is None:
+            raise ValidationError(f"{symbol} is not in the watchlist.")
+        cand = copy.deepcopy(self.wl)
+        stock = cand.get(symbol)
+        saved = copy.deepcopy(alert)
+        replaced = False
+        for i, existing in enumerate(stock.alerts):
+            if existing.id == saved.id:
+                stock.alerts[i] = saved
+                replaced = True
+                break
+        if not replaced:
+            stock.alerts.append(saved)
+        self._commit(cand)
+        committed_stock = self.wl.get(symbol)
+        committed_alert = next(a for a in committed_stock.alerts if a.id == saved.id)
+        tick = (self.rows.get(symbol) or RowState()).tick
+        sess = self.session(self.now_fn())
+        events = self.engine.register_alert(committed_stock, committed_alert, tick, self.now_fn(), choice, session=sess)
+        self.dispatch(events)
+        self._save_state()
+        self._notify_quote_listeners()
+
+    def delete_alert(self, symbol: str, alert_id: str) -> None:
+        """Immediately remove an alert from `symbol` and persist atomically."""
+        if self.wl.get(symbol) is None:
+            raise ValidationError(f"{symbol} is not in the watchlist.")
+        cand = copy.deepcopy(self.wl)
+        stock = cand.get(symbol)
+        stock.alerts = [a for a in stock.alerts if a.id != alert_id]
+        self._commit(cand)
+        self.engine.remove_alert(symbol, alert_id)
+        self._save_state()
+        self._notify_quote_listeners()
+
+    def toggle_alert(self, symbol: str, alert_id: str, enabled: bool) -> None:
+        """Immediately enable/disable an alert (re-arming DONE/EXPIRED alerts) and persist."""
+        if self.wl.get(symbol) is None:
+            raise ValidationError(f"{symbol} is not in the watchlist.")
+        cand = copy.deepcopy(self.wl)
+        stock = cand.get(symbol)
+        target = next((a for a in stock.alerts if a.id == alert_id), None)
+        if target is None:
+            raise ValidationError(f"{symbol}/{alert_id}: alert not found.")
+        target.enabled = bool(enabled)
+        now = self.now_fn()
+        cur_state = self.engine.alert_state(symbol, alert_id).get("state")
+        if target.enabled and cur_state in (DONE, EXPIRED):
+            if target.expiration in ("end_of_session", "end_of_next_session", "1_week", "1_month"):
+                target.expires_at = compute_expires_at(target.expiration, now, self.calendar)
+            elif target.expiration == "custom":
+                target.expiration = "open_ended"
+                target.expires_at = None
+        self._commit(cand)
+        committed_stock = self.wl.get(symbol)
+        committed_alert = next(a for a in committed_stock.alerts if a.id == alert_id)
+        tick = (self.rows.get(symbol) or RowState()).tick
+        sess = self.session(now)
+        self.engine.register_alert(committed_stock, committed_alert, tick, now, choice="wait_cross", session=sess)
+        self._save_state()
+        self._notify_quote_listeners()
+
+    def alert_status_label(self, symbol: str, alert: Alert) -> str:
+        if not alert.enabled:
+            return "Paused"
+        st = self.engine.alert_state(symbol, alert.id).get("state", ARMED)
+        return {
+            ARMED: "Active",
+            WAIT_CROSS: "Waiting",
+            DISARMED: "Re-arming",
+            COOLDOWN: "Cooldown",
+            DONE: "Triggered",
+            EXPIRED: "Expired",
+            DISABLED: "Paused",
+        }.get(st, "Active")
 
     def remove_stock(self, symbol: str) -> None:
         cand = copy.deepcopy(self.wl)
@@ -495,15 +571,19 @@ class AppController:
         ev = AlertEvent(
             symbol=sym,
             alert_id="__test_alert__",
-            kind="level",
+            kind="crossing",
             label="TEST",
             priority="HIGH",
             price=price,
             time=t_now,
             source="test",
             category=cat,
-            condition="test notification",
-            note="Edit Mode test check (audio, toast & popup)",
+            condition="Test notification",
+            session="RH",
+            name="Test Alert",
+            message="Test notification (popup, toast & alarm)",
+            note="Edit Mode test check",
+            notification=resolve_notification_spec("HIGH"),
         )
         note = Notification([ev])
         try:
@@ -768,10 +848,6 @@ class AppController:
             w.append("FINNHUB_API_KEY is not set, so prices are not polled. Set it and restart.")
         return w
 
-    def zone_tag(self, symbol: str) -> str:
-        z = self.engine.state.get("symbols", {}).get(symbol, {}).get("zone")
-        return TAGS.get(z) or "" if z else ""
-
     def row_views(self, now: datetime) -> list:
         sess = self.session(now)
         active_sess = is_active_session(sess, getattr(self.cfg, "extended_hours", True))
@@ -779,7 +855,10 @@ class AppController:
         for s in self.wl.symbols:
             row = self.rows.get(s.symbol) or RowState()
             t = row.tick
-            active = sum(1 for a in s.alerts if a.enabled and self.engine.alert_state(s.symbol, a.id)["state"] not in (DONE, DISABLED))
+            active = sum(
+                1 for a in s.alerts
+                if a.enabled and self.engine.alert_state(s.symbol, a.id)["state"] not in (DONE, EXPIRED, DISABLED)
+            )
             ss = self.engine.state.get("symbols", {}).get(s.symbol, {})
             pre = row.pre_price if row.pre_price is not None else _safe_dec(ss.get("pre_price"))
             reg = (row.reg_price if row.reg_price is not None else
@@ -816,5 +895,5 @@ class AppController:
             else:
                 color = "up" if chg > 0 else "down"
             out.append(RowView(s.symbol, s.nickname, f"{t.price:.2f}", ctext, arrow, s.category,
-                               self.zone_tag(s.symbol), active, color, age, warn, ph_txt, rh_txt, ah_txt))
+                               "", active, color, age, warn, ph_txt, rh_txt, ah_txt))
         return out

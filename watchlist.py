@@ -1,24 +1,51 @@
-"""Parse, validate and dump watchlist.json (blueprint sections 9.8 and 10.2)."""
+"""Parse, validate and dump watchlist.json."""
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from config import Config, check_budget, BudgetError
-from models import (ALERT_TYPES, CATEGORIES, DEFAULT_LABEL_BY_CATEGORY, LABELS, MODES,
-                    PRIORITIES, Alert, PlannedEntry, Position, StockConfig, ValidationError, Watchlist)
-from zones import ZONE_DEFAULTS, check_thresholds
+from config import Config, BudgetError, check_budget
+from models import (
+    ALERT_OPERATORS,
+    CATEGORIES,
+    CHANNEL_OPERATORS,
+    CONDITION_MODES,
+    DEFAULT_LABEL_BY_CATEGORY,
+    EXPIRATION_PRESETS,
+    LABELS,
+    MOVING_OPERATORS,
+    PCT_BASES,
+    PRIORITIES,
+    SESSION_SCOPES,
+    SOUND_DURATIONS,
+    SOUND_TONES,
+    TRIGGER_MODES,
+    Alert,
+    CustomNotification,
+    StockConfig,
+    TradeInfo,
+    ValidationError,
+    Watchlist,
+)
 
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 PCT_MIN, PCT_MAX = Decimal(-90), Decimal(500)
-ZONE_NAMES_BY_CAT = {
-    "SELL": {"deep_loss", "loss", "below_be", "breakeven", "above_be", "sell", "high_sell"},
-    "HOLD": {"deep_loss", "loss", "below_be"},
-    "BUY": {"deep_drop", "entry_hit", "near_entry", "above_entry", "far_above"},
-    "WATCH": set(),
+
+_LEGACY_OP_MAP = {
+    "level_above": "greater_than",
+    "level_below": "less_than",
+    "cross_above": "crossing_up",
+    "cross_below": "crossing_down",
+    "pct_move_day": "moving_up_pct",
 }
-ALL_ZONE_NAMES = set().union(*ZONE_NAMES_BY_CAT.values()) | {"sell"}
+_LEGACY_TRIGGER_MAP = {
+    "once": "once",
+    "rearm": "rearm",
+    "repeat": "every_time",
+    "every_time": "every_time",
+}
 
 
 def _dec(v, what: str) -> Decimal:
@@ -33,79 +60,236 @@ def _dec(v, what: str) -> Decimal:
     return d
 
 
-def _pos(v, what):
+def _pos(v, what: str) -> Decimal:
     d = _dec(v, what)
     if d <= 0:
         raise ValidationError(f"{what} must be above 0.")
     return d
 
 
+def _nonneg(v, what: str) -> Decimal:
+    d = _dec(v, what)
+    if d < 0:
+        raise ValidationError(f"{what} cannot be negative.")
+    return d
+
+
+def _whole_int(v, what: str, lo: int, hi: int) -> int:
+    if isinstance(v, bool):
+        raise ValidationError(f"{what} must be a whole number ({lo} to {hi}).")
+    try:
+        d = v if isinstance(v, Decimal) else Decimal(str(v))
+    except Exception:
+        raise ValidationError(f"{what} must be a whole number ({lo} to {hi}).")
+    if not d.is_finite() or d != int(d) or not (lo <= int(d) <= hi):
+        raise ValidationError(f"{what} must be a whole number ({lo} to {hi}).")
+    return int(d)
+
+
+def _parse_custom_notif(raw, prefix: str) -> Optional[CustomNotification]:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValidationError(f"{prefix}: custom_notification must be an object.")
+    tone = raw.get("sound_tone", "chime")
+    if tone not in SOUND_TONES:
+        raise ValidationError(f"{prefix}: sound_tone must be one of {', '.join(SOUND_TONES)}.")
+    sec = _whole_int(raw.get("sound_seconds", 5), f"{prefix} sound_seconds", 0, 30)
+    if sec not in SOUND_DURATIONS:
+        raise ValidationError(f"{prefix}: sound_seconds must be 0, 5, 10 or 30.")
+    return CustomNotification(
+        popup=bool(raw.get("popup", True)),
+        toast=bool(raw.get("toast", True)),
+        sound_tone=tone,
+        sound_seconds=sec,
+        repeat_until_ack=bool(raw.get("repeat_until_ack", False)),
+    )
+
+
+def _migrate_legacy_alert_dict(a: dict) -> Optional[dict]:
+    """Convert pre-revamp `type`-based alert dicts to the new `operator` schema.
+    Returns None for obsolete `zone_exit` entries so old watchlists still load."""
+    if "operator" in a or "type" not in a:
+        return a
+    t = a.get("type")
+    if t == "zone_exit":
+        return None
+    op = _LEGACY_OP_MAP.get(t)
+    if op is None:
+        return a
+    out = dict(a)
+    out["operator"] = op
+    if op in ("moving_up_pct", "moving_down_pct"):
+        out["condition_mode"] = "pct"
+        out["pct_base"] = "prev_close"
+        out["value"] = a.get("pct")
+        out.setdefault("window_min", 1440)
+    elif a.get("price") is not None:
+        out["condition_mode"] = "price"
+        out["value"] = a.get("price")
+    else:
+        out["condition_mode"] = "pct"
+        out["pct_base"] = "auto"
+        out["value"] = a.get("pct")
+    if "trigger" not in out and "mode" in out:
+        out["trigger"] = _LEGACY_TRIGGER_MAP.get(out["mode"], "once")
+    note = str(a.get("note", "") or "").strip()
+    if note and not out.get("name"):
+        out["name"] = note
+    return out
+
+
 def parse_alert(a: dict, stock: StockConfig, cfg: Config) -> Alert:
     if not isinstance(a, dict):
         raise ValidationError(f"{stock.symbol}: an alert is not an object.")
+    if "operator" not in a and "type" in a:
+        migrated = _migrate_legacy_alert_dict(a)
+        if migrated is None:
+            raise ValidationError(f"{stock.symbol}/{a.get('id', '?')}: legacy zone_exit alerts are removed.")
+        a = migrated
+
     aid = a.get("id")
     if not aid or not isinstance(aid, str):
         raise ValidationError(f"{stock.symbol}: every alert needs an id.")
-    t = a.get("type")
-    if t not in ALERT_TYPES:
-        raise ValidationError(f"{stock.symbol}/{aid}: unknown alert type {t!r}.")
+
+    op = a.get("operator", "crossing")
+    if op not in ALERT_OPERATORS:
+        raise ValidationError(f"{stock.symbol}/{aid}: unknown alert operator {op!r}.")
+
+    cmode = a.get("condition_mode", "price")
+    if cmode not in CONDITION_MODES:
+        raise ValidationError(f"{stock.symbol}/{aid}: condition_mode must be 'price' or 'pct'.")
+    if op in ("moving_up_pct", "moving_down_pct"):
+        cmode = "pct"
+    elif op in ("moving_up", "moving_down"):
+        cmode = "price"
+
+    pct_base = a.get("pct_base", "auto")
+    if pct_base not in PCT_BASES:
+        raise ValidationError(f"{stock.symbol}/{aid}: unknown pct_base {pct_base!r}.")
+    ref_price = _pos(a["ref_price"], f"{stock.symbol}/{aid} ref_price") if a.get("ref_price") is not None else None
+    if cmode == "pct" and op not in MOVING_OPERATORS and pct_base == "custom" and ref_price is None:
+        raise ValidationError(f"{stock.symbol}/{aid}: custom % reference requires a price above 0.")
+
+    val = upper = lower = None
+    win = _whole_int(a.get("window_min", 5), f"{stock.symbol}/{aid} window_min", 1, 1440)
+
+    if op in CHANNEL_OPERATORS:
+        if a.get("lower") is None or a.get("upper") is None:
+            raise ValidationError(f"{stock.symbol}/{aid}: channel alerts require both Lower and Upper bounds.")
+        if cmode == "price":
+            lower = _pos(a["lower"], f"{stock.symbol}/{aid} Lower")
+            upper = _pos(a["upper"], f"{stock.symbol}/{aid} Upper")
+        else:
+            lower = _dec(a["lower"], f"{stock.symbol}/{aid} Lower")
+            upper = _dec(a["upper"], f"{stock.symbol}/{aid} Upper")
+            if not (PCT_MIN <= lower <= PCT_MAX and PCT_MIN <= upper <= PCT_MAX):
+                raise ValidationError(f"{stock.symbol}/{aid}: channel percents must be between -90 and +500.")
+        if lower >= upper:
+            raise ValidationError(f"{stock.symbol}/{aid}: Lower bound must be less than Upper bound.")
+    elif op in MOVING_OPERATORS:
+        if a.get("value") is None:
+            raise ValidationError(f"{stock.symbol}/{aid}: moving alerts require an amount above 0.")
+        val = _pos(a["value"], f"{stock.symbol}/{aid} value")
+        if op in ("moving_up_pct", "moving_down_pct") and val > PCT_MAX:
+            raise ValidationError(f"{stock.symbol}/{aid}: moving percent must be at most +500.")
+    else:
+        if a.get("value") is None:
+            raise ValidationError(f"{stock.symbol}/{aid}: enter a target value.")
+        if cmode == "price":
+            val = _pos(a["value"], f"{stock.symbol}/{aid} value")
+        else:
+            val = _dec(a["value"], f"{stock.symbol}/{aid} percent")
+            if not (PCT_MIN <= val <= PCT_MAX):
+                raise ValidationError(f"{stock.symbol}/{aid}: percent must be between -90 and +500.")
+
+    trigger = a.get("trigger", "once")
+    if trigger not in TRIGGER_MODES:
+        raise ValidationError(f"{stock.symbol}/{aid}: trigger must be once, every_time or rearm.")
+    cd = _whole_int(a.get("cooldown_min", 1), f"{stock.symbol}/{aid} cooldown_min", 1, 10080)
+
+    exp = a.get("expiration", "open_ended")
+    if exp not in EXPIRATION_PRESETS:
+        raise ValidationError(f"{stock.symbol}/{aid}: invalid expiration {exp!r}.")
+    exp_at = a.get("expires_at")
+    if exp_at is not None:
+        if not isinstance(exp_at, str) or not exp_at.strip():
+            raise ValidationError(f"{stock.symbol}/{aid}: expires_at must be an ISO timestamp string.")
+        try:
+            datetime.fromisoformat(exp_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValidationError(f"{stock.symbol}/{aid}: invalid expires_at timestamp.")
+
+    scope = a.get("session_scope", "all")
+    if scope not in SESSION_SCOPES:
+        raise ValidationError(f"{stock.symbol}/{aid}: session_scope must be all, regular or extended.")
+
     label = a.get("label", DEFAULT_LABEL_BY_CATEGORY[stock.category])
-    prio = a.get("priority", cfg.default_priority)
-    mode = a.get("mode", cfg.level_alert_mode)
     if label not in LABELS:
         raise ValidationError(f"{stock.symbol}/{aid}: label must be one of {', '.join(LABELS)}.")
+
+    prio = a.get("priority", cfg.default_priority)
     if prio not in PRIORITIES:
-        raise ValidationError(f"{stock.symbol}/{aid}: priority must be LOW, MEDIUM or HIGH.")
-    if mode not in MODES:
-        raise ValidationError(f"{stock.symbol}/{aid}: mode must be once, rearm or repeat.")
-    price = _pos(a["price"], f"{stock.symbol}/{aid} price") if a.get("price") is not None else None
-    pct = _dec(a["pct"], f"{stock.symbol}/{aid} pct") if a.get("pct") is not None else None
-    zone = a.get("zone")
-    if t == "zone_exit":
-        if price is not None or pct is not None:
-            raise ValidationError(f"{stock.symbol}/{aid}: a zone alert has no price or percent.")
-        if zone not in ZONE_NAMES_BY_CAT.get(stock.category, ()):
-            raise ValidationError(f"{stock.symbol}/{aid}: unknown zone {zone!r} for {stock.category}.")
-    elif t == "pct_move_day":
-        if pct is None or price is not None:
-            raise ValidationError(f"{stock.symbol}/{aid}: a daily move alert requires a percent and cannot set a price.")
-        if not (0 < pct <= PCT_MAX):
-            raise ValidationError(f"{stock.symbol}/{aid}: a daily move percent must be above 0 and at most +500.")
-    else:
-        if (price is None) == (pct is None):
-            raise ValidationError(f"{stock.symbol}/{aid}: set a price or a percent, not both and not neither.")
-        if pct is not None and not (PCT_MIN <= pct <= PCT_MAX):
-            raise ValidationError(f"{stock.symbol}/{aid}: percent must be between -90 and +500.")
-        if pct is not None and stock.category == "WATCH":
-            raise ValidationError(f"{stock.symbol}/{aid}: WATCH stocks have no base for a percent alert; use a price.")
-    cd = a.get("cooldown_min", cfg.cooldown_min)
-    if (isinstance(cd, bool) or not isinstance(cd, (int, Decimal))
-            or (isinstance(cd, Decimal) and (not cd.is_finite() or cd != int(cd)))
-            or not (1 <= int(cd) <= 10080)):
-        raise ValidationError(f"{stock.symbol}/{aid}: cooldown_min must be a whole number of minutes (1 to 10080).")
-    return Alert(id=aid, type=t, label=label, priority=prio, enabled=bool(a.get("enabled", True)),
-                 mode=mode, price=price, pct=pct, zone=zone, cooldown_min=int(cd), note=str(a.get("note", "")))
+        raise ValidationError(f"{stock.symbol}/{aid}: priority must be LOW, MEDIUM, HIGH or CUSTOM.")
+    custom_notif = _parse_custom_notif(a.get("custom_notification"), f"{stock.symbol}/{aid}")
+
+    return Alert(
+        id=aid,
+        operator=op,
+        condition_mode=cmode,
+        value=val,
+        upper=upper,
+        lower=lower,
+        window_min=win,
+        pct_base=pct_base,
+        ref_price=ref_price,
+        trigger=trigger,
+        cooldown_min=cd,
+        expiration=exp,
+        expires_at=exp_at,
+        session_scope=scope,
+        name=str(a.get("name", "") or ""),
+        message=str(a.get("message", "") or ""),
+        priority=prio,
+        custom_notification=custom_notif,
+        enabled=bool(a.get("enabled", True)),
+        label=label,
+    )
 
 
-def make_default_slipping_alert(symbol: str) -> Alert:
-    """Section 5.5: the sell-range zone-exit alert every SELL stock starts with (RISK, MEDIUM).
-    The user can edit or delete it afterwards."""
-    return Alert(id=f"{symbol.lower()}-slip", type="zone_exit", label="RISK", priority="MEDIUM",
-                 zone="sell", note="Slipping")
+def _parse_trade(d: dict, sym: str) -> Optional[TradeInfo]:
+    """Parse manual `trade` dict or migrate legacy `position` / `planned_entry`."""
+    t_raw = d.get("trade")
+    if t_raw is not None:
+        if not isinstance(t_raw, dict):
+            raise ValidationError(f"{sym}: trade must be an object.")
+        bp = _pos(t_raw["buy_price"], f"{sym} buy_price") if t_raw.get("buy_price") is not None else None
+        sh = _pos(t_raw["shares"], f"{sym} shares") if t_raw.get("shares") is not None else None
+        sp = _pos(t_raw["sell_price"], f"{sym} sell_price") if t_raw.get("sell_price") is not None else None
+        fe = _nonneg(t_raw["fees"], f"{sym} fees") if t_raw.get("fees") is not None else None
+        if bp is None and sh is None and sp is None and fe is None:
+            return None
+        return TradeInfo(buy_price=bp, shares=sh, sell_price=sp, fees=fe)
 
-
-def ensure_slipping_alert(stock: StockConfig) -> bool:
-    """Add the default Slipping alert unless the stock already has a sell-range zone-exit alert.
-    Called only when a SELL stock is ADDED or a stock is SWITCHED to SELL. It is never called when
-    a watchlist is loaded from disk, so a deleted Slipping alert stays deleted across restarts."""
-    if any(a.type == "zone_exit" and a.zone == "sell" for a in stock.alerts):
-        return False
-    alert = make_default_slipping_alert(stock.symbol)
-    taken, base, n = {a.id for a in stock.alerts}, alert.id, 2
-    while alert.id in taken:
-        alert.id, n = f"{base}-{n}", n + 1
-    stock.alerts.append(alert)
-    return True
+    # Migrate legacy position / planned_entry cleanly
+    pos = d.get("position")
+    pe = d.get("planned_entry")
+    bp = sh = fe = None
+    if isinstance(pos, dict):
+        if pos.get("avg_price") is not None:
+            bp = _pos(pos["avg_price"], f"{sym} average price")
+        if pos.get("shares") is not None:
+            sh = _pos(pos["shares"], f"{sym} shares")
+        if pos.get("actual_buy_fee") is not None:
+            fe = _nonneg(pos["actual_buy_fee"], f"{sym} fee")
+    elif isinstance(pe, dict):
+        if pe.get("price") is not None:
+            bp = _pos(pe["price"], f"{sym} planned entry")
+        if pe.get("shares") is not None:
+            sh = _pos(pe["shares"], f"{sym} planned shares")
+    if bp is None and sh is None and fe is None:
+        return None
+    return TradeInfo(buy_price=bp, shares=sh, fees=fe)
 
 
 def parse_stock(d: dict, cfg: Config) -> StockConfig:
@@ -114,57 +298,24 @@ def parse_stock(d: dict, cfg: Config) -> StockConfig:
     sym = str(d.get("symbol", "")).strip().upper()
     if not SYMBOL_RE.match(sym):
         raise ValidationError(f"Bad ticker {d.get('symbol')!r}.")
-    cat = d.get("category")
+    cat = d.get("category", "WATCH")
     if cat not in CATEGORIES:
         raise ValidationError(f"{sym}: category must be BUY, HOLD, SELL or WATCH.")
-    st = StockConfig(symbol=sym, category=cat, nickname=str(d.get("nickname", "")),
-                     noisy=bool(d.get("noisy", False)))
-    p = d.get("position")
-    if p is not None:
-        if not isinstance(p, dict):
-            raise ValidationError(f"{sym}: position must be an object.")
-        fee = p.get("actual_buy_fee")
-        fee = _dec(fee, f"{sym} actual buy fee") if fee is not None else None
-        if fee is not None and fee < 0:
-            raise ValidationError(f"{sym}: the buy fee cannot be below 0.")
-        st.position = Position(_pos(p.get("shares"), f"{sym} shares"),
-                               _pos(p.get("avg_price"), f"{sym} average price"), fee)
-    e = d.get("planned_entry")
-    if e is not None:
-        if not isinstance(e, dict):
-            raise ValidationError(f"{sym}: planned_entry must be an object.")
-        sh = e.get("shares")
-        st.planned_entry = PlannedEntry(_pos(e.get("price"), f"{sym} planned entry"),
-                                        _pos(sh, f"{sym} planned shares") if sh is not None else None)
-    if cat in ("HOLD", "SELL") and st.position is None:
-        raise ValidationError(f"{sym}: {cat} needs shares and an average price.")
-    if cat == "BUY" and st.planned_entry is None:
-        raise ValidationError(f"{sym}: BUY needs a planned entry price.")
-    z_raw = d.get("zones")
-    if z_raw is not None and not isinstance(z_raw, dict):
-        raise ValidationError(f"{sym}: zones must be an object.")
-    z = z_raw or {}
-    for name, ov in z.items():
-        if name not in ZONE_DEFAULTS:
-            raise ValidationError(f"{sym}: unknown zone {name!r}.")
-        if not isinstance(ov, dict):
-            raise ValidationError(f"{sym}: zone {name} override must be an object.")
-        clean = {}
-        if "pct" in ov:
-            clean["pct"] = _dec(ov["pct"], f"{sym} {name} threshold")
-        if "priority" in ov:
-            if ov["priority"] not in PRIORITIES:
-                raise ValidationError(f"{sym}: zone {name} priority must be LOW, MEDIUM or HIGH.")
-            clean["priority"] = ov["priority"]
-        if "enabled" in ov:
-            clean["enabled"] = bool(ov["enabled"])
-        st.zones[name] = clean
-    check_thresholds(st, cfg.zone_defaults)
+    trade = _parse_trade(d, sym)
+    st = StockConfig(
+        symbol=sym,
+        category=cat,
+        nickname=str(d.get("nickname", "")),
+        noisy=bool(d.get("noisy", False)),
+        trade=trade,
+    )
     alerts_raw = d.get("alerts")
     if alerts_raw is not None and not isinstance(alerts_raw, list):
         raise ValidationError(f"{sym}: alerts must be a list.")
     seen = set()
     for a in alerts_raw or []:
+        if isinstance(a, dict) and "operator" not in a and a.get("type") == "zone_exit":
+            continue  # drop obsolete zone_exit alerts gracefully on load
         al = parse_alert(a, st, cfg)
         if al.id in seen:
             raise ValidationError(f"{sym}: duplicate alert id {al.id!r}.")
@@ -204,28 +355,60 @@ def dump_watchlist(wl: Watchlist) -> dict:
     out = []
     for s in wl.symbols:
         d = {"symbol": s.symbol, "nickname": s.nickname, "category": s.category, "noisy": s.noisy}
-        if s.position:
-            d["position"] = {"shares": _num(s.position.shares), "avg_price": _num(s.position.avg_price),
-                             "actual_buy_fee": _num(s.position.actual_buy_fee)}
-        if s.planned_entry:
-            d["planned_entry"] = {"price": _num(s.planned_entry.price), "shares": _num(s.planned_entry.shares)}
-        if s.zones:
-            d["zones"] = {n: {k: (_num(v) if k == "pct" else v) for k, v in ov.items()} for n, ov in s.zones.items()}
+        if s.trade and any(
+            v is not None for v in (s.trade.buy_price, s.trade.shares, s.trade.sell_price, s.trade.fees)
+        ):
+            t_dict = {}
+            if s.trade.buy_price is not None:
+                t_dict["buy_price"] = _num(s.trade.buy_price)
+            if s.trade.shares is not None:
+                t_dict["shares"] = _num(s.trade.shares)
+            if s.trade.sell_price is not None:
+                t_dict["sell_price"] = _num(s.trade.sell_price)
+            if s.trade.fees is not None:
+                t_dict["fees"] = _num(s.trade.fees)
+            d["trade"] = t_dict
         al = []
         for a in s.alerts:
-            x = {"id": a.id, "type": a.type}
-            if a.price is not None:
-                x["price"] = _num(a.price)
-            if a.pct is not None:
-                x["pct"] = _num(a.pct)
-            if a.zone:
-                x["zone"] = a.zone
-            x.update({"label": a.label, "priority": a.priority})
-            if a.type != "zone_exit":
-                x["mode"] = a.mode
-                if a.mode == "repeat":
-                    x["cooldown_min"] = a.cooldown_min
-            x.update({"enabled": a.enabled, "note": a.note})
+            x = {
+                "id": a.id,
+                "operator": a.operator,
+                "condition_mode": a.condition_mode,
+            }
+            if a.value is not None:
+                x["value"] = _num(a.value)
+            if a.lower is not None:
+                x["lower"] = _num(a.lower)
+            if a.upper is not None:
+                x["upper"] = _num(a.upper)
+            if a.operator in MOVING_OPERATORS:
+                x["window_min"] = int(a.window_min)
+            if a.condition_mode == "pct" and a.pct_base != "auto":
+                x["pct_base"] = a.pct_base
+            if a.ref_price is not None:
+                x["ref_price"] = _num(a.ref_price)
+            x["trigger"] = a.trigger
+            if a.trigger == "every_time":
+                x["cooldown_min"] = int(a.cooldown_min)
+            x["expiration"] = a.expiration
+            if a.expires_at:
+                x["expires_at"] = a.expires_at
+            x["session_scope"] = a.session_scope
+            if a.name:
+                x["name"] = a.name
+            if a.message:
+                x["message"] = a.message
+            x["label"] = a.label
+            x["priority"] = a.priority
+            if a.custom_notification is not None:
+                x["custom_notification"] = {
+                    "popup": bool(a.custom_notification.popup),
+                    "toast": bool(a.custom_notification.toast),
+                    "sound_tone": a.custom_notification.sound_tone,
+                    "sound_seconds": int(a.custom_notification.sound_seconds),
+                    "repeat_until_ack": bool(a.custom_notification.repeat_until_ack),
+                }
+            x["enabled"] = bool(a.enabled)
             al.append(x)
         d["alerts"] = al
         out.append(d)

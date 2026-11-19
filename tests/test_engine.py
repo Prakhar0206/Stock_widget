@@ -1,267 +1,266 @@
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal as Dc
 
 import pytest
 
-from engine import AlertEngine, merge_events
+from config import Config
+from engine import (
+    AlertEngine,
+    compute_expires_at,
+    default_alert_message,
+    merge_events,
+    render_alert_message,
+    resolve_alert_targets,
+    session_matches_scope,
+)
 from market_clock import Session
 from messages import format_message
-from models import ARMED, COOLDOWN, DISARMED, DONE, WAIT_CROSS, Alert
-from conftest import Feed, T0, aapl, lvl, tick, ttwo, watch
+from models import ARMED, COOLDOWN, DISABLED, DISARMED, DONE, EXPIRED, WAIT_CROSS, Alert, StockConfig, TradeInfo
+from conftest import Feed, T0, aapl, al, lvl, tick, ttwo, watch
 
 
 def state_of(engine, sym, aid):
     return engine.alert_state(sym, aid)["state"]
 
 
-def test_4_rearm_level_below(engine):
-    s = watch([lvl("d", "level_below", price="202.73")])
+def test_primary_five_operators(engine):
+    s = watch([
+        al("x", "crossing", "100", trigger="rearm"),
+        al("cu", "crossing_up", "100", trigger="rearm"),
+        al("cd", "crossing_down", "100", trigger="rearm"),
+        al("gt", "greater_than", "100", trigger="once"),
+        al("lt", "less_than", "100", trigger="once"),
+    ])
     f = Feed(engine, s)
-    assert f.push("205") == []                                  # first reading, not true
-    ev = f.push("202.73")
-    assert [e.alert_id for e in ev] == ["d"]
-    assert state_of(engine, "TTWO", "d") == DISARMED
-    assert f.push("202.00") == []                               # still below: no refire
-    f.push("203.74364")
-    assert state_of(engine, "TTWO", "d") == DISARMED            # 202.73 x 1.005 = 203.74365
-    assert Dc("202.73") * Dc("1.005") == Dc("203.74365")
-    f.push("203.74365")
-    assert state_of(engine, "TTWO", "d") == ARMED
-    assert [e.alert_id for e in f.push("202.50")] == ["d"]      # fires again
+    # First reading 98: lt fires on first reading; crossing ops wait for a cross
+    ev1 = f.push("98")
+    assert {e.alert_id for e in ev1} == {"lt"}
+
+    # Move across 100 -> 102: crossing, crossing_up, greater_than fire
+    ev2 = f.push("102")
+    assert {e.alert_id for e in ev2} == {"x", "cu", "gt"}
+
+    # Move down across 100 -> 99: crossing, crossing_down fire; lt/gt stay DONE
+    ev3 = f.push("99")
+    assert {e.alert_id for e in ev3} == {"x", "cd"}
+    assert state_of(engine, "TTWO", "gt") == DONE
+    assert state_of(engine, "TTWO", "lt") == DONE
 
 
-def test_5_first_reading_zone_silent_level_fires(engine):
-    s = aapl(alerts=[lvl("t", "level_above", price="205", mode="once")])
+def test_channel_four_operators(engine):
+    s = watch([
+        al("ent", "entering_channel", lower="95", upper="105", trigger="rearm"),
+        al("ext", "exiting_channel", lower="95", upper="105", trigger="rearm"),
+        al("ins", "inside_channel", lower="95", upper="105", trigger="once"),
+        al("out", "outside_channel", lower="95", upper="105", trigger="once"),
+    ])
     f = Feed(engine, s)
-    ev = f.push("207.50")        # lands in the sell zone AND above 205 on the very first reading
-    assert [e.alert_id for e in ev] == ["t"]                    # level fires, no zone entry
-    assert engine.sym_state("AAPL")["zone"] == "sell"
+    # Start outside at 90 -> outside_channel triggers on first reading
+    assert {e.alert_id for e in f.push("90")} == {"out"}
+    # Enter channel -> 100: entering_channel & inside_channel fire
+    assert {e.alert_id for e in f.push("100")} == {"ent", "ins"}
+    # Stay inside -> 101: nothing fires
+    assert f.push("101") == []
+    # Exit channel -> 108: exiting_channel fires
+    assert {e.alert_id for e in f.push("108")} == {"ext"}
 
 
-def test_zone_entry_fires_after_first_reading(engine):
-    s = aapl()
+def test_moving_four_operators_with_window(engine):
+    s = watch([
+        al("mu", "moving_up", "5", window_min=10, trigger="once"),
+        al("md", "moving_down", "5", window_min=10, trigger="once"),
+        al("mup", "moving_up_pct", "4", window_min=10, trigger="once"),
+        al("mdp", "moving_down_pct", "4", window_min=10, trigger="once"),
+    ])
     f = Feed(engine, s)
-    assert f.push("200") == []
-    ev = f.push("207.50")
-    assert [e.alert_id for e in ev] == ["zone:sell"] and ev[0].priority == "MEDIUM" and ev[0].label == "SELL"
-    msg = format_message(ev[0], T0).splitlines()
-    assert msg[0].startswith("[MEDIUM] AAPL · SELL · 207.50 ·") and msg[0].endswith("IST")
-    assert msg[1] == "Entered sell zone, +3.02% above breakeven"
-    assert msg[2] == "est. net +$60.72"
-    assert msg[3] == "Estimate before tax. Source Mock feed, data age 4 s."
+    assert f.push("100") == []
+    # +6 dollars (+6%) within 1 minute -> mu and mup fire
+    assert {e.alert_id for e in f.push("106")} == {"mu", "mup"}
+    # Now baseline in 10-min window includes 106; drop to 99 (-7 dollars, -6.6% vs 106)
+    assert {e.alert_id for e in f.push("99")} == {"md", "mdp"}
 
 
-def test_slipping_zone_exit(engine):
-    slip = Alert("slip", "zone_exit", "RISK", "MEDIUM", zone="sell", note="Slipping")
-    s = aapl(alerts=[slip])
-    f = Feed(engine, s)
-    f.push("200"); f.push("207.50")
-    assert f.push("206.60") == []                               # inside the band
-    ev = f.push("206.30")                                       # P +2.43 < 2.5
-    assert "slip" in [e.alert_id for e in ev]
-    slip_ev = [e for e in ev if e.alert_id == "slip"][0]
-    assert slip_ev.label == "RISK" and slip_ev.priority == "MEDIUM"
-    assert f.push("207.45") == []                               # P +2.99: one cent short of the start
-    assert f.push("207.46")[0].alert_id == "zone:sell"          # re-entry at the exact start price
+def test_pct_condition_uses_trade_price_and_falls_back_to_prev_close_for_watch(engine):
+    # SELL stock with buy=200, shares=10, fees=14.10 -> effective buy = 201.41
+    s_sell = StockConfig(
+        "AAPL",
+        "SELL",
+        "Apple",
+        False,
+        TradeInfo(buy_price=Dc("200.00"), shares=Dc("10"), fees=Dc("14.10")),
+        [al("pct-target", "greater_than", "3", condition_mode="pct", trigger="once")],
+    )
+    single, _, target_text, base_desc = resolve_alert_targets(s_sell, s_sell.alerts[0], prev_close=Dc("195.00"))
+    # 201.41 * 1.03 = 207.4523 -> 207.45 (or 207.4523)
+    assert single is not None and Dc("207.44") <= single <= Dc("207.46")
+    assert "breakeven" in base_desc.lower() or "buy" in base_desc.lower() or "201.41" in base_desc
+
+    # WATCH stock without TradeInfo falls back cleanly to prev_close
+    s_watch = watch([al("w-pct", "greater_than", "5", condition_mode="pct", trigger="once")])
+    f = Feed(engine, s_watch)
+    assert f.push("104", prev_close="100") == []
+    assert [e.alert_id for e in f.push("106", prev_close="100")] == ["w-pct"]
 
 
-def test_high_sell_to_sell_is_not_slipping(engine):
-    slip = Alert("slip", "zone_exit", "RISK", "MEDIUM", zone="sell")
-    f = Feed(engine, aapl(alerts=[slip]))
-    f.push("200"); f.push("212")
-    assert "slip" not in [e.alert_id for e in f.push("208")]
-
-
-def test_6_wait_cross_does_not_fire_until_other_side(engine):
-    s = watch([lvl("w", "level_below", price="202.73", mode="once")])
-    f = Feed(engine, s)
-    f.push("201")
-    ev = engine.register_alert(s, s.alerts[0], tick("201"), T0, choice="wait_cross")
-    assert ev == [] and state_of(engine, "TTWO", "w") == WAIT_CROSS
-    assert f.push("200") == [] and state_of(engine, "TTWO", "w") == WAIT_CROSS   # still true: no fire
-    assert f.push("204") == [] and state_of(engine, "TTWO", "w") == ARMED        # other side: armed
-    assert [e.alert_id for e in f.push("202")] == ["w"]
-
-
-def test_creation_check_fire_now_and_requires_choice(engine):
-    s = watch([lvl("n", "level_below", price="202.73", mode="once")])
-    assert engine.would_fire_now(s, s.alerts[0], Dc("201.90"))
-    with pytest.raises(ValueError):
-        engine.register_alert(s, s.alerts[0], tick("201.90"), T0)
-    ev = engine.register_alert(s, s.alerts[0], tick("201.90"), T0, choice="fire_now")
-    assert len(ev) == 1 and state_of(engine, "TTWO", "n") == DONE
-
-
-def test_startup_armed_true_fires_done_never_does(engine):
-    s = watch([lvl("a", "level_below", price="205", mode="once"), lvl("b", "level_below", price="205", mode="once")])
-    engine.alert_state("TTWO", "b")["state"] = DONE
-    ev = Feed(engine, s).push("200")
-    assert [e.alert_id for e in ev] == ["a"]
-
-
-def test_7_jump_fires_each_crossed_level_in_priority_order(engine):
-    s = watch([lvl("low", "level_above", price="205", prio="LOW"),
-              lvl("high", "level_above", price="210", prio="HIGH"),
-              lvl("med", "level_above", price="208", prio="MEDIUM"),
-              lvl("far", "level_above", price="230", prio="HIGH")])
-    f = Feed(engine, s)
-    f.push("203")
-    ev = f.push("212")                                          # jumps over three levels
-    assert [e.alert_id for e in ev if e.kind == "level"] == ["high", "med", "low"]
-    note = merge_events(ev)
-    assert note.priority == "HIGH" and len(note.events) >= 3
-
-
-def test_8_repeat_cooldown_survives_restart(cfg, tmp_path):
+def test_triggers_once_every_time_and_rearm_and_restart_persistence(cfg, tmp_path):
     from store import Store
+
     store = Store(tmp_path)
-    s = watch([lvl("r", "level_below", price="205", mode="repeat", cooldown=30)])
+    s = watch([
+        al("et", "less_than", "205", trigger="every_time", cooldown=30),
+        al("once", "less_than", "205", trigger="once"),
+        al("ra", "less_than", "205", trigger="rearm"),
+    ])
     e1 = AlertEngine(cfg, store.load_state())
     f = Feed(e1, s)
-    assert [e.alert_id for e in f.push("200")] == ["r"]
-    assert state_of(e1, "TTWO", "r") == COOLDOWN
+    assert {e.alert_id for e in f.push("200")} == {"et", "once", "ra"}
+    assert state_of(e1, "TTWO", "et") == COOLDOWN
+    assert state_of(e1, "TTWO", "once") == DONE
+    assert state_of(e1, "TTWO", "ra") == DISARMED
     store.save_state(e1.state)
-    e2 = AlertEngine(cfg, store.load_state())                   # restart
-    f2 = Feed(e2, s); f2.t = f.t
-    assert f2.push("199") == []                                 # still cooling down
+
+    e2 = AlertEngine(cfg, store.load_state())
+    f2 = Feed(e2, s)
+    f2.t = f.t
+    assert f2.push("199") == []  # still cooling down / DONE / DISARMED
     f2.t += timedelta(minutes=31)
-    assert [e.alert_id for e in f2.push("199")] == ["r"]        # cooldown over, still true: fires
-    # and a DONE alert is not re-fired after a restart
-    s2 = watch([lvl("o", "level_below", price="205", mode="once")])
-    e3 = AlertEngine(cfg, store.load_state()); f3 = Feed(e3, s2)
-    assert len(f3.push("200")) == 1
-    store.save_state(e3.state)
-    e4 = AlertEngine(cfg, store.load_state())
-    assert Feed(e4, s2).push("200") == []
+    assert [e.alert_id for e in f2.push("199")] == ["et"]  # every_time refires after cooldown even while true
+
+    # Returning false rearms 'ra', not 'once'
+    f2.push("210")
+    assert state_of(e2, "TTWO", "ra") == ARMED
+    assert state_of(e2, "TTWO", "once") == DONE
 
 
-def test_cooldown_ends_with_condition_false_rearms(engine):
-    s = watch([lvl("r", "level_below", price="205", mode="repeat", cooldown=1)])
+def test_expiration_presets_and_expired_transition(engine):
+    assert compute_expires_at("open_ended", T0) is None
+    eos = datetime.fromisoformat(compute_expires_at("end_of_session", T0))
+    eonext = datetime.fromisoformat(compute_expires_at("end_of_next_session", T0))
+    assert eos > T0 and eonext > eos
+    assert datetime.fromisoformat(compute_expires_at("1_week", T0)) == T0 + timedelta(days=7)
+    assert datetime.fromisoformat(compute_expires_at("1_month", T0)) == T0 + timedelta(days=30)
+
+    exp_past = T0 - timedelta(minutes=1)
+    s = watch([al("exp", "greater_than", "100", trigger="once", expiration="custom", expires_at=exp_past)])
     f = Feed(engine, s)
-    f.push("200"); f.t += timedelta(minutes=5)
-    assert f.push("210") == [] and state_of(engine, "TTWO", "r") == ARMED
+    assert f.push("150") == []
+    assert state_of(engine, "TTWO", "exp") == EXPIRED
 
 
-def test_once_mode_never_refires(engine):
-    s = watch([lvl("o", "level_below", price="205", mode="once")])
+def test_session_scopes_and_extended_hours_toggle():
+    assert session_matches_scope(Session.REGULAR, "regular", True) is True
+    assert session_matches_scope(Session.PRE, "regular", True) is False
+    assert session_matches_scope(Session.AFTER, "regular", True) is False
+    assert session_matches_scope(Session.PRE, "extended", True) is True
+    assert session_matches_scope(Session.REGULAR, "extended", True) is False
+    assert session_matches_scope(Session.CLOSED, "all", True) is False
+    assert session_matches_scope(Session.PRE, "all", False) is False
+
+    e = AlertEngine(Config())
+    s = watch([
+        al("reg", "greater_than", "100", session_scope="regular", trigger="once"),
+        al("ext", "greater_than", "100", session_scope="extended", trigger="once"),
+        al("all", "greater_than", "100", session_scope="all", trigger="once"),
+    ])
+    # CLOSED ignores all alerts
+    f_closed = Feed(e, s, session=Session.CLOSED)
+    assert f_closed.push("150") == []
+    # PRE fires only ext and all
+    f_closed.session = Session.PRE
+    assert {ev.alert_id for ev in f_closed.push("150")} == {"ext", "all"}
+    # REGULAR fires reg
+    f_closed.session = Session.REGULAR
+    assert [ev.alert_id for ev in f_closed.push("150")] == ["reg"]
+
+
+def test_wait_cross_and_register_alert_choice_contract(engine):
+    s = watch([al("w", "less_than", "202.73", trigger="once")])
+    assert engine.would_fire_now(s, s.alerts[0], Dc("201.90")) is True
+    with pytest.raises(ValueError):
+        engine.register_alert(s, s.alerts[0], tick("201.90"), T0)
+
+    ev_wait = engine.register_alert(s, s.alerts[0], tick("201.90"), T0, choice="wait_cross")
+    assert ev_wait == [] and state_of(engine, "TTWO", "w") == WAIT_CROSS
     f = Feed(engine, s)
-    f.push("210")
-    assert len(f.push("200")) == 1
-    f.push("210")
-    assert f.push("200") == [] and state_of(engine, "TTWO", "o") == DONE
+    assert f.push("200") == [] and state_of(engine, "TTWO", "w") == WAIT_CROSS
+    assert f.push("204") == [] and state_of(engine, "TTWO", "w") == ARMED
+    assert [e.alert_id for e in f.push("202")] == ["w"]
+
+    s2 = watch([al("fn", "less_than", "202.73", trigger="once")])
+    ev_now = engine.register_alert(s2, s2.alerts[0], tick("201.90"), T0, choice="fire_now")
+    assert len(ev_now) == 1 and state_of(engine, "TTWO", "fn") == DONE
 
 
-def test_percent_level_moves_with_base_price_level_does_not(engine):
-    s = aapl(alerts=[lvl("p", "level_above", pct=3, mode="once", label="SELL"),
-                     lvl("f", "level_above", price=210, mode="once")])
-    base = Dc("201.41")
-    assert engine.level_price(s.alerts[0], base) == base * Dc("1.03")
-    s.position.avg_price = Dc("100")                            # base changes
-    from positions import stock_base
-    nb = stock_base(s)
-    assert engine.level_price(s.alerts[0], nb) != base * Dc("1.03")
-    assert engine.level_price(s.alerts[1], nb) == Dc(210)
-
-
-def test_noisy_level_needs_two_readings(engine):
-    s = watch([lvl("n", "level_above", price="210", mode="once")])
+def test_noisy_stock_needs_two_consecutive_readings(engine):
+    s = watch([al("n", "greater_than", "210", trigger="once")])
     s.noisy = True
     f = Feed(engine, s)
     f.push("205")
-    assert f.push("211") == []                                  # first true reading
-    assert [e.alert_id for e in f.push("211.5")] == ["n"]       # second consecutive
-    s2 = watch([lvl("m", "level_above", price="210", mode="once")]); s2.noisy = True
+    assert f.push("211") == []
+    assert [e.alert_id for e in f.push("211.5")] == ["n"]
+
+    s2 = watch([al("m", "greater_than", "210", trigger="once")])
+    s2.noisy = True
     f2 = Feed(AlertEngine(engine.cfg), s2)
-    f2.push("205"); f2.push("211"); assert f2.push("205") == []; assert f2.push("211") == []   # reset
+    f2.push("205")
+    f2.push("211")
+    assert f2.push("205") == []
+    assert f2.push("211") == []
 
 
-def test_cross_alerts_never_fire_first_reading(engine):
-    s = watch([lvl("c", "cross_above", price="205", mode="once"), lvl("d", "cross_below", price="205")])
+def test_jump_orders_by_priority_and_disabled_and_remove_stock(engine):
+    s = watch([
+        al("low", "greater_than", "205", prio="LOW", trigger="once"),
+        al("high", "greater_than", "210", prio="HIGH", trigger="once"),
+        al("med", "greater_than", "208", prio="MEDIUM", trigger="once"),
+        al("dis", "greater_than", "205", prio="HIGH", enabled=False),
+    ])
     f = Feed(engine, s)
-    assert f.push("210") == []                                  # above on first reading: nothing
-    assert [e.alert_id for e in f.push("204")] == ["d"]
-    assert [e.alert_id for e in f.push("206")] == ["c"]
-    assert f.push("207") == []
+    f.push("203")
+    ev = f.push("212")
+    assert [e.alert_id for e in ev] == ["high", "med", "low"]
+    assert state_of(engine, "TTWO", "dis") == DISABLED
+    note = merge_events(ev)
+    assert note.priority == "HIGH" and len(note.events) == 3
 
-
-def test_pct_move_day(engine):
-    s = watch([Alert("m", "pct_move_day", "WATCH", "LOW", mode="rearm", pct=Dc(5))])
-    f = Feed(engine, s)
-    f.push("200", prev_close="200")
-    assert [e.alert_id for e in f.push("211", prev_close="200")] == ["m"]
-    assert f.push("189", prev_close="200") == []                # same day: disarmed
-    assert [e.alert_id for e in f.push("160", prev_close="150")] == ["m"]   # new previous close = new day
-
-
-def test_no_alerts_outside_regular_session(engine):
-    from config import Config
-    from engine import AlertEngine
-
-    # Default Config has extended_hours=True: PRE and AFTER are active; CLOSED suppresses alerts without mutating zones.
-    s = aapl(alerts=[lvl("t", "level_above", price="205", mode="once")])
-    f = Feed(engine, s, session=Session.CLOSED)
-    assert f.push("210") == [] and f.push("212") == []
-    assert engine.sym_state("AAPL")["zone"] is None
-    f.session = Session.AFTER
-    assert [e.alert_id for e in f.push("212")] == ["t"]         # armed + true at first active reading
-
-    # With extended_hours=False, AFTER/PRE suppress alerts until REGULAR opens.
-    e_reg = AlertEngine(Config(extended_hours=False))
-    f2 = Feed(e_reg, aapl(alerts=[lvl("t", "level_above", price="205", mode="once")]), session=Session.AFTER)
-    assert f2.push("210") == [] and f2.push("212") == []
-    assert e_reg.sym_state("AAPL")["zone"] is None
-    f2.session = Session.REGULAR
-    assert [e.alert_id for e in f2.push("212")] == ["t"]
-
-
-def test_disabled_alert_stays_quiet_and_reenables(engine):
-    a = lvl("x", "level_below", price="205")
-    a.enabled = False
-    s = watch([a]); f = Feed(engine, s)
-    assert f.push("200") == [] and state_of(engine, "TTWO", "x") == "DISABLED"
-    a.enabled = True
-    assert len(f.push("200")) == 1
-
-
-def test_remove_stock_clears_state(engine):
-    s = watch([lvl("x", "level_below", price="205")])
-    Feed(engine, s).push("200")
+    s.alerts[3].enabled = True
+    assert [e.alert_id for e in f.push("212")] == ["dis"]
     engine.remove_stock("TTWO")
     assert "TTWO" not in engine.state["symbols"]
 
 
-def test_message_never_tells_user_to_trade(engine):
-    s = aapl(); f = Feed(engine, s); f.push("200")
-    text = format_message(f.push("207.50")[0], T0).lower()
+def test_message_placeholder_rendering_and_format(engine):
+    a = al(
+        "msg1",
+        "crossing_up",
+        "210.00",
+        name="Breakout",
+        message="{{ticker}} hit ${{price}} vs {{target}} ({{change_pct}}) in {{session}} at {{time}}",
+        prio="MEDIUM",
+    )
+    rendered = render_alert_message(
+        a.message,
+        {
+            "ticker": "AAPL",
+            "price": "210.50",
+            "target": "$210.00",
+            "change_pct": "+3.10%",
+            "session": "REGULAR",
+            "time": "20:30 IST",
+        },
+    )
+    assert rendered == "AAPL hit $210.50 vs $210.00 (+3.10%) in REGULAR at 20:30 IST"
+    assert "AAPL" in default_alert_message("AAPL", a, "$210.00")
+
+    s = aapl(alerts=[a])
+    f = Feed(engine, s)
+    f.push("205", prev_close="200")
+    evs = f.push("211", prev_close="200")
+    assert len(evs) == 1
+    msg = format_message(evs[0], T0)
+    assert "[MEDIUM] AAPL" in msg
+    assert "Breakout" in msg
+    assert "AAPL hit $211.00" in msg
     for bad in ("you should", "buy now", "sell now", "recommend"):
-        assert bad not in text
-
-
-def test_no_flapping_around_the_sell_boundary(engine):
-    """Enter at 207.46; wobbling just below it (inside the 0.5 band) fires nothing more."""
-    f = Feed(engine, aapl())
-    f.push("200")
-    assert [e.alert_id for e in f.push("207.46")] == ["zone:sell"]
-    for p in ["207.40", "207.50", "206.90", "207.46", "206.60", "207.00"]:
-        assert f.push(p) == [], p
-    assert [e.alert_id for e in f.push("206.30")] == ["zone:above_be"]      # leaves at P < +2.5
-
-
-def test_loss_zone_fires_at_its_start_price_from_below_breakeven(engine):
-    """Regression: the HIGH 'Loss zone' alert used to wait until about -3.5%."""
-    f = Feed(engine, aapl())
-    f.push("200")                                               # below breakeven
-    assert f.push("195.37") == []                               # -2.999%: not yet
-    ev = f.push("195.36")                                       # -3.0%: the stated start
-    assert [e.alert_id for e in ev] == ["zone:loss"] and ev[0].priority == "HIGH" and ev[0].label == "RISK"
-    assert f.push("196.30") == []                               # still inside the exit band (P < -2.5): stays
-    assert [e.alert_id for e in f.push("196.40")] == ["zone:below_be"]     # P > -2.5: left the loss zone
-
-
-def test_high_sell_then_back_to_sell_keeps_band(engine):
-    f = Feed(engine, aapl())
-    f.push("200"); f.push("207.50")
-    assert [e.alert_id for e in f.push("210.48")] == ["zone:high_sell"]
-    assert f.push("209.50") == []                               # P +4.0: still high sell (exit below +4.0)
-    assert [e.alert_id for e in f.push("209.40")] == ["zone:sell"]
+        assert bad not in msg.lower()

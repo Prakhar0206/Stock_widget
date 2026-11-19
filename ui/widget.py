@@ -145,7 +145,15 @@ class EditPanel(tk.Frame):
     def _open(self, symbol):
         self.open_symbol = symbol
         box, _ = self._rows[symbol]
-        self.editor = StockEditor(box, self.ctrl, symbol, self.view.now_fn, self.schedule_resize, self._removed)
+        self.editor = StockEditor(
+            box,
+            self.ctrl,
+            symbol,
+            self.view.now_fn,
+            self.schedule_resize,
+            self._removed,
+            on_alerts_changed=self.refresh,
+        )
         self.editor.pack(fill="x", pady=(1, 4))
 
     def _close(self):
@@ -218,9 +226,10 @@ class EditPanel(tk.Frame):
             ph = getattr(rv, "ph_price_text", "—")
             rh = getattr(rv, "rh_price_text", "—")
             ah = getattr(rv, "ah_price_text", "—")
+            warn_part = f" {rv.warning[:18]:<18}" if rv.warning else ""
             text = (f"{sel} {rv.symbol:<6} {rv.nickname[:12]:<12} "
                     f"PH {ph:>7}  RH {rh:>7}  AH {ah:>7}  {rv.arrow} {rv.change_text:<17} "
-                    f"{rv.category:<5} {rv.zone_tag[:18]:<18} {rv.alerts} alert{'s' if rv.alerts != 1 else ''}")
+                    f"{rv.category:<5}{warn_part}  {rv.alerts} alert{'s' if rv.alerts != 1 else ''}")
             head.config(text=text, fg=COLORS.get(rv.color, FG), bg=FLASH_BG if rv.symbol in flashing else BG2)
         if self.editor is not None and self.editor.winfo_exists():
             self.editor.refresh_price_line()
@@ -537,9 +546,10 @@ class WidgetView:
               wmax(f, [r.category for r in rows]), wmax(f, [r.zone_tag or r.warning for r in rows]),
               wmax(f, [f"{r.alerts} alert{'s' if r.alerts != 1 else ''}" for r in rows])]
         xs, x = [], content_x1
-        for w_ in cw:
+        for i, w_ in enumerate(cw):
             xs.append(x)
-            x += w_ + gap
+            if w_ > 0 or i != 7:
+                x += w_ + gap
         table_w = max(x - gap, content_x1) - content_x1
         hdr_y1 = card_pad
         hdr_y2 = card_pad + lh + 6
@@ -713,7 +723,8 @@ class WidgetView:
             self._t(xs[4] + cw[4], row_cy, getattr(r, "ah_price_text", "—"), ah_col, ah_font, anchor="e")
             self._t(xs[5], row_cy, f"{r.arrow} {r.change_text}".strip(), chg_col, f, anchor="w")
             self._t(xs[6], row_cy, r.category, MUTED, f, anchor="w")
-            self._t(xs[7], row_cy, tail_txt, tail_col, f, anchor="w")
+            if tail_txt:
+                self._t(xs[7], row_cy, tail_txt, tail_col, f, anchor="w")
             self._t(xs[8], row_cy, f"{r.alerts} alert{'s' if r.alerts != 1 else ''}", MUTED, f, anchor="w")
             y += row_step
         if not rows:

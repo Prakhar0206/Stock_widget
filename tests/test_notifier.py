@@ -1,13 +1,13 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal as Dc
 
 from config import Config
 from engine import Notification
-from models import AlertEvent
-from decimal import Decimal as Dc
+from models import AlertEvent, CustomNotification
 from notifier import Notifier, NullBackends
 
-T = datetime(2026, 10, 14, 15, 0, tzinfo=timezone.utc)       # 20:30 IST
+T = datetime(2026, 10, 14, 15, 0, tzinfo=timezone.utc)  # 20:30 IST
 
 
 class Timers:
@@ -39,18 +39,41 @@ class Rec(NullBackends):
     def __init__(self):
         self.log = []
 
-    def toast(self, text, stay, silent): self.log.append(("toast", stay))
-    def beep(self, kind): self.log.append(("beep", kind))
-    def popup_show(self, text, priority, seconds, on_ack): self.log.append(("popup", seconds))
-    def popup_close(self): self.log.append(("close",))
-    def flash(self, symbol, ms): self.log.append(("flash", symbol, ms))
+    def toast(self, text, stay, silent):
+        self.log.append(("toast", stay, silent))
 
-    def count(self, name): return sum(1 for x in self.log if x[0] == name)
+    def beep(self, kind):
+        self.log.append(("beep", kind))
+
+    def popup_show(self, text, priority, seconds, on_ack):
+        self.log.append(("popup", priority, seconds))
+
+    def popup_close(self):
+        self.log.append(("close",))
+
+    def flash(self, symbol, ms):
+        self.log.append(("flash", symbol, ms))
+
+    def count(self, name):
+        return sum(1 for x in self.log if x[0] == name)
 
 
-def ev(prio, sym="AAPL"):
-    return AlertEvent(sym, "a", "level", "SELL", prio, Dc("207.50"), T, "mock", "SELL", "at or above 207.50",
-                      pct_vs_base=Dc("3.02"), base_name="breakeven", net_estimate=Dc("60.72"), data_age_s=4)
+def ev(prio, sym="AAPL", custom=None):
+    return AlertEvent(
+        sym,
+        "a",
+        "crossing_up",
+        "SELL",
+        prio,
+        Dc("207.50"),
+        T,
+        "mock",
+        "SELL",
+        "Crossing Up $207.50",
+        session="REGULAR",
+        data_age_s=4,
+        notification=custom,
+    )
 
 
 def make(cfg=None):
@@ -58,37 +81,56 @@ def make(cfg=None):
     return Notifier(cfg or Config(), b, t, lambda: T), b, t
 
 
-def test_low_only_flashes():
+def test_low_flashes_toasts_and_plays_single_chime_without_popup():
     n, b, t = make()
     n.notify(Notification([ev("LOW")]))
-    assert b.log == [("flash", "AAPL", 2000)]
+    assert ("flash", "AAPL", 2000) in b.log
+    assert any(x[0] == "toast" and x[1] is False for x in b.log)
+    assert b.count("beep") == 1
+    assert b.count("popup") == 0
 
 
-def test_medium_toast_and_short_sound():
+def test_medium_shows_popup_toast_and_5s_sound():
     n, b, t = make()
     n.notify(Notification([ev("MEDIUM")]))
-    assert b.log == [("flash", "AAPL", 2000), ("toast", False), ("beep", "medium")]
+    assert ("flash", "AAPL", 2000) in b.log
+    assert any(x[0] == "toast" and x[1] is False for x in b.log)
+    assert ("popup", "MEDIUM", 10) in b.log
+    t.advance(4_500)
+    assert b.count("beep") >= 4
+    t.advance(2_000)  # t = 6.5s -> sound stopped, popup still visible
+    beeps_at_6s5 = b.count("beep")
+    assert b.count("close") == 0
+    t.advance(3_000)  # t = 9.5s -> still no extra beeps, popup still visible
+    assert b.count("beep") == beeps_at_6s5
+    assert b.count("close") == 0
+    t.advance(1_000)  # t = 10.5s -> closes at 10s
+    assert b.count("close") == 1
 
 
-def test_high_popup_repeating_sound_for_10_seconds_then_closes_toast_stays():
+def test_high_plays_10s_alarm_persistent_toast_and_repeats_until_acknowledged():
     n, b, t = make()
     n.notify(Notification([ev("HIGH")]))
-    assert ("toast", True) in b.log and ("popup", 10) in b.log
+    assert any(x[0] == "toast" and x[1] is True for x in b.log)
+    assert ("popup", "HIGH", 10) in b.log
     t.advance(9_500)
     beeps = b.count("beep")
-    assert 9 <= beeps <= 11
-    t.advance(1_000)                                          # past 10 s
+    assert 7 <= beeps <= 12
+    t.advance(1_000)
     assert b.count("close") == 1
-    after = b.count("beep"); t.advance(5_000)
-    assert b.count("beep") == after                           # sound stopped
+    after = b.count("beep")
+    t.advance(5_000)
+    assert b.count("beep") == after
 
-
-def test_high_escalates_once_after_2_minutes_if_not_acknowledged():
-    n, b, t = make()
-    n.notify(Notification([ev("HIGH")]))
-    t.advance(119_000); assert b.count("popup") == 1
-    t.advance(2_000);   assert b.count("popup") == 2          # repeated once
-    t.advance(600_000); assert b.count("popup") == 2          # then stops
+    # Repeats every 2 minutes continuously until acknowledged
+    t.advance(120_000)  # t = 135.5s -> popup 2 already opened at 120s and closed at 130s
+    assert b.count("popup") == 2
+    t.advance(105_000)  # t = 240.5s -> popup 3 just opened at 240s and is still active
+    assert b.count("popup") == 3
+    assert n.acknowledge_latest() is True
+    assert b.count("close") == 3
+    t.advance(300_000)
+    assert b.count("popup") == 3
 
 
 def test_acknowledge_stops_repeat_and_sound():
@@ -102,75 +144,67 @@ def test_acknowledge_stops_repeat_and_sound():
     assert n.acknowledge_latest() is False
 
 
-def test_new_high_alert_gets_its_own_escalation():
+def test_custom_notification_profile_flags():
+    # Toast + no popup + bell for 0s (once) + no repeat
+    spec = CustomNotification(popup=False, toast=True, sound_tone="bell", sound_seconds=0, repeat_until_ack=False)
     n, b, t = make()
-    n.notify(Notification([ev("HIGH", "AAPL")]))
-    t.advance(60_000)
-    n.notify(Notification([ev("HIGH", "TTWO")]))
-    t.advance(121_000)
-    assert b.count("popup") == 3                              # AAPL, TTWO, TTWO again
+    n.notify(Notification([ev("CUSTOM", custom=spec)]))
+    assert b.count("popup") == 0
+    assert b.count("toast") == 1
+    assert ("beep", "bell") in b.log
+    t.advance(10_000)
+    assert b.count("beep") == 1
+
+    # Silent custom notification with popup only
+    spec2 = CustomNotification(popup=True, toast=False, sound_tone="none", sound_seconds=5, repeat_until_ack=False)
+    n2, b2, t2 = make()
+    n2.notify(Notification([ev("CUSTOM", custom=spec2)]))
+    assert b2.count("popup") == 1
+    assert b2.count("toast") == 0
+    assert b2.count("beep") == 0
 
 
 def test_mute_silences_sound_and_toast_but_high_popup_still_appears_silently():
     n, b, t = make()
     n.toggle_mute()
     n.notify(Notification([ev("HIGH")]))
-    assert ("flash", "AAPL", 2000) in b.log                  # rows keep updating
-    assert b.count("toast") == 0 and b.count("beep") == 0    # no toast, no sound
-    assert ("popup", 10) in b.log                            # but the pop-up is shown
+    assert ("flash", "AAPL", 2000) in b.log
+    assert b.count("toast") == 0 and b.count("beep") == 0
+    assert ("popup", "HIGH", 10) in b.log
     t.advance(11_000)
-    assert b.count("close") == 1 and b.count("beep") == 0    # and closes on its normal 10 s timer, silently
+    assert b.count("close") == 1 and b.count("beep") == 0
 
 
-def test_mute_medium_alert_flashes_only():
+def test_mute_low_alert_flashes_only():
     n, b, t = make()
     n.toggle_mute()
-    n.notify(Notification([ev("MEDIUM")]))
-    assert b.log == [("flash", "AAPL", 2000)]                # no toast, no beep, no pop-up for MEDIUM
+    n.notify(Notification([ev("LOW")]))
+    assert b.log == [("flash", "AAPL", 2000)]
 
 
-def test_muted_high_alert_still_escalates_once_silently():
-    n, b, t = make()
-    n.toggle_mute()
+def test_quiet_hours_popup_appears_without_sound():
+    cfg = replace(
+        Config(),
+        quiet_hours_ist=(
+            datetime.strptime("20:00", "%H:%M").time(),
+            datetime.strptime("21:00", "%H:%M").time(),
+        ),
+    )
+    n, b, t = make(cfg)
     n.notify(Notification([ev("HIGH")]))
-    t.advance(125_000)
-    assert b.count("popup") == 2 and b.count("beep") == 0 and b.count("toast") == 0
-    t.advance(600_000)
-    assert b.count("popup") == 2
-
-
-def test_mute_mid_alert_stops_sound_but_keeps_the_popup_up():
-    n, b, t = make()
-    n.notify(Notification([ev("HIGH")]))
-    t.advance(2_000); n.toggle_mute()
-    beeps = b.count("beep"); t.advance(5_000)
-    assert b.count("beep") == beeps                          # sound stopped
-    assert b.count("close") == 0                             # pop-up still showing at 7 s
-    t.advance(4_000)
-    assert b.count("close") == 1                             # closes at 10 s as usual
-
-
-def test_unmute_restores_toast_and_sound_for_the_next_alert():
-    n, b, t = make()
-    n.toggle_mute(); n.toggle_mute()
-    n.notify(Notification([ev("MEDIUM")]))
-    assert ("toast", False) in b.log and ("beep", "medium") in b.log
-
-
-def test_acknowledge_closes_a_muted_popup_too():
-    n, b, t = make()
-    n.toggle_mute()
-    n.notify(Notification([ev("HIGH")]))
-    assert n.acknowledge_latest() is True and b.count("close") == 1
-    t.advance(300_000)
-    assert b.count("popup") == 1                             # no escalation after Got it
+    t.advance(3_000)
+    assert b.count("popup") == 1 and b.count("beep") == 0
+    m, b2, _ = make(cfg)
+    m.notify(Notification([ev("MEDIUM")]))
+    assert b2.count("beep") == 0 and b2.count("toast") == 1
 
 
 def test_windows_toast_runs_on_a_background_thread_and_never_blocks_the_caller():
     import threading
     from notifier import WindowsBackends
+
     wb = WindowsBackends()
-    wb._mode = "wt"                                          # pretend a toast library is available
+    wb._mode = "wt"
     started, release, seen = threading.Event(), threading.Event(), {}
 
     def slow_toast(text, stay):
@@ -178,8 +212,9 @@ def test_windows_toast_runs_on_a_background_thread_and_never_blocks_the_caller()
         seen["args"] = (text, stay)
         started.set()
         release.wait(2)
+
     wb._toast_blocking = slow_toast
-    wb.toast("line1\nline2", True, True)                    # returns immediately although the toast is "slow"
+    wb.toast("line1\nline2", True, True)
     assert started.wait(2)
     assert seen["thread"] is not threading.main_thread() and seen["thread"].daemon
     assert seen["args"] == ("line1\nline2", True)
@@ -191,14 +226,12 @@ def test_windows_toast_disabled_without_a_library_and_errors_are_swallowed(monke
     import types
     from notifier import WindowsBackends
 
-    # Simulate missing toast libraries so WindowsBackends initializes with _mode = None
     monkeypatch.setitem(sys.modules, "windows_toasts", None)
     monkeypatch.setitem(sys.modules, "winotify", None)
     wb = WindowsBackends()
     assert wb._mode is None
-    wb.toast("x", False, True)                               # no library: silently does nothing
+    wb.toast("x", False, True)
 
-    # Stub failing windows_toasts module so real OS WinRT toasts are never triggered on Windows
     wt_mod = types.ModuleType("windows_toasts")
     wt_audio_mod = types.ModuleType("windows_toasts.toast_audio")
 
@@ -218,9 +251,8 @@ def test_windows_toast_disabled_without_a_library_and_errors_are_swallowed(monke
 
     wb._mode = "wt"
     wb._toaster = None
-    wb._toast_blocking("x", False)                           # must swallow toast failure without raising
+    wb._toast_blocking("x", False)
 
-    # Stub failing winotify module too
     wn_mod = types.ModuleType("winotify")
 
     class _FakeNotification:
@@ -233,25 +265,17 @@ def test_windows_toast_disabled_without_a_library_and_errors_are_swallowed(monke
     wn_mod.Notification = _FakeNotification
     monkeypatch.setitem(sys.modules, "winotify", wn_mod)
     wb._mode = "wn"
-    wb._toast_blocking("x", True)                            # must swallow winotify failure without raising
-
-
-def test_quiet_hours_popup_appears_without_sound():
-    cfg = replace(Config(), quiet_hours_ist=(datetime.strptime("20:00", "%H:%M").time(), datetime.strptime("21:00", "%H:%M").time()))
-    n, b, t = make(cfg)
-    n.notify(Notification([ev("HIGH")]))
-    t.advance(3_000)
-    assert b.count("popup") == 1 and b.count("beep") == 0
-    m = make(cfg)[0]; 
-    m.b.log.clear(); m.notify(Notification([ev("MEDIUM")]))
-    assert m.b.count("beep") == 0 and m.b.count("toast") == 1
+    wb._toast_blocking("x", True)
 
 
 def test_merged_notification_uses_highest_priority_and_text():
     from messages import format_notification
+
     note = Notification([ev("LOW", "AAPL"), ev("HIGH", "TTWO"), ev("MEDIUM", "MSFT")])
     assert note.priority == "HIGH"
     text = format_notification(note, T)
-    assert text.splitlines()[0].startswith("[HIGH] TTWO") and "Also [MEDIUM] MSFT" in text and "Also [LOW] AAPL" in text
-    n, b, t = make(); n.notify(note)
+    assert text.splitlines()[0].startswith("[HIGH] TTWO")
+    assert "Also [MEDIUM] MSFT" in text and "Also [LOW] AAPL" in text
+    n, b, t = make()
+    n.notify(note)
     assert b.count("flash") == 3

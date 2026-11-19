@@ -12,7 +12,7 @@ BTN, ACCENT = "#3A3A3A", "#3B82F6"
 GREEN, RED, AMBER, GREY, DIM = "#4ADE80", "#F87171", "#FBBF24", "#A3A3A3", "#6B7280"
 FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
-PRIO_COLORS = {"HIGH": "#7F1D1D", "MEDIUM": "#78350F", "LOW": "#1F2937"}
+PRIO_COLORS = {"HIGH": "#7F1D1D", "MEDIUM": "#78350F", "LOW": "#1F2937", "CUSTOM": "#1E293B"}
 TRANSPARENT_KEY = "#010203"    # colour made fully transparent on Windows (never used for text)
 
 

@@ -107,13 +107,13 @@ def make_controller(tmp_path, keys=("k1", "k2", "k3", "k4"), symbols=("AAPL", "M
     provider, http_sess, clock = make(list(keys), session=session, clock=clock, internet_check_fn=internet_check_fn)
     cfg = Config(poll_seconds=15, stale_after_seconds=180, api_keys=list(keys))
     store = Store(tmp_path)
-    from models import PlannedEntry
+    from models import TradeInfo
     wl = Watchlist(symbols=[
         StockConfig(
             symbol=sym,
             category="BUY",
-            planned_entry=PlannedEntry(price=Decimal("150")),
-            alerts=[Alert(id=f"a-{sym}", type="level_above", label="BUY", priority="HIGH", price=Decimal("200"))]
+            trade=TradeInfo(buy_price=Decimal("150")),
+            alerts=[Alert(id=f"a-{sym}", operator="greater_than", value=Decimal("200"), label="BUY", priority="HIGH")]
         )
         for sym in symbols
     ])

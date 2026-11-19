@@ -345,7 +345,7 @@ def test_watchlist_update_propagates_to_mini_tracker(tk_app):
     assert view.mini is not None
 
     # Add new stock
-    new_s = StockConfig("GOOGL", "WATCH", "Alphabet", False, None, None, {}, [])
+    new_s = StockConfig("GOOGL", "WATCH", "Alphabet", False, None, [])
     ctrl.add_stock(new_s)
 
     # Deliver tick for GOOGL
