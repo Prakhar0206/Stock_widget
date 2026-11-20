@@ -197,7 +197,7 @@ class MiniTrackerWindow(tk.Toplevel):
 
     def __init__(self, master, get_state, set_state, get_rows, get_alerts,
                  acknowledge, on_closed=None, get_alert_tooltip=None,
-                 on_row_double_click=None):
+                 on_row_double_click=None, hidden: bool = False):
         super().__init__(master, bg=BG)
         self._get_state, self._set_state = get_state, set_state
         self._get_rows, self._get_alerts = get_rows, get_alerts
@@ -217,7 +217,8 @@ class MiniTrackerWindow(tk.Toplevel):
         self._tip_lbl = None
         self._alerting = False
         self._overflow = False
-        self._privacy_hidden = False
+        self._privacy_hidden = bool(hidden)
+        self._placed = False
         self._body_h = self._content_h = 0
 
         self.overrideredirect(True)
@@ -227,6 +228,11 @@ class MiniTrackerWindow(tk.Toplevel):
         except tk.TclError:
             pass
         apply_panel_style(self, ALPHA)
+        if self._privacy_hidden:
+            try:
+                self.withdraw()
+            except tk.TclError:
+                pass
 
         self.shell = tk.Frame(self, bg=BG, highlightthickness=1,
                               highlightbackground=BORDER, highlightcolor=BORDER)
@@ -249,9 +255,11 @@ class MiniTrackerWindow(tk.Toplevel):
         _bind_wheel(self.overflow_up_lbl, self._on_wheel)
         _bind_wheel(self.overflow_down_lbl, self._on_wheel)
 
-        st = self._state()
-        self.refresh()
-        self._place_initial(st)
+        if not self._privacy_hidden:
+            st = self._state()
+            self.refresh()
+            self._place_initial(st)
+            self._placed = True
         self._flash_tick()
 
     # -- state helpers
@@ -599,16 +607,24 @@ class MiniTrackerWindow(tk.Toplevel):
             except tk.TclError:
                 pass
         else:
+            apply_panel_style(self, ALPHA)
             try:
-                self.deiconify()
-                try:
-                    self.attributes("-topmost", True)
-                except tk.TclError:
-                    pass
-                self.lift()
+                self.attributes("-topmost", True)
             except tk.TclError:
                 pass
             self.refresh()
+            st = self._state()
+            if not self._placed or st.get("pos_x") is None or st.get("pos_y") is None:
+                self._place_initial(st)
+                self._placed = True
+            else:
+                self._autosize(anchor=(int(st["pos_x"]), int(st["pos_y"])))
+            try:
+                self.deiconify()
+                self.lift()
+            except tk.TclError:
+                pass
+            self._update_overflow_indicators()
 
     # -- settings / close
     def open_settings(self):

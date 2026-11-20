@@ -420,6 +420,7 @@ class DesktopLayer:
         self.peeking = False          # True while Alt+W is held
         self.interactive = False      # True in edit mode: clicks + keyboard focus
         self.hidden = False           # True while privacy-hidden: withdrawn, alerts stay active
+        self.on_peek_change = None    # optional callback(peeking: bool)
         self.allow_geometry = True    # only our own code may move/resize
         self.raw_zorder = False       # bypass z-order rewriting (internal use)
         self.reposition_pending = False
@@ -560,7 +561,7 @@ class DesktopLayer:
         if self.hwnd is None:                        # before attach(): just remember the size
             self.width, self.height = width, height
             return
-        if self.hidden:
+        if self.hidden and not self.peeking:
             self.width, self.height = width, height
             self.reposition_pending = True
             return
@@ -644,7 +645,7 @@ class DesktopLayer:
     def _on_windowpos_changing(self, lparam):
         """Every move/resize/z-order change passes through here first."""
         wp = WINDOWPOS.from_address(lparam)
-        if self.hidden:
+        if self.hidden and not self.peeking:
             if not self.allow_geometry:
                 wp.flags |= SWP_NOMOVE | SWP_NOSIZE
                 wp.flags &= ~SWP_SHOWWINDOW          # stay hidden until set_hidden(False)
@@ -688,8 +689,46 @@ class DesktopLayer:
             w = GetWindow(w, GW_HWNDPREV)
         return w == self.hwnd
 
+    def _hide_native(self) -> None:
+        self.allow_geometry = True
+        try:
+            try:
+                self.root.withdraw()
+            except Exception:
+                pass
+            if self.hwnd:
+                SetWindowPos(
+                    self.hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+                )
+        finally:
+            self.allow_geometry = False
+
+    def _show_native(self, zorder_after) -> None:
+        x, y = self._target_position()
+        self.allow_geometry = True
+        try:
+            try:
+                self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+                self.root.update_idletasks()
+                self.root.attributes("-alpha", self._opacity())
+            except Exception:
+                pass
+            if self.hwnd:
+                self._apply_window_styles()
+                SetWindowPos(
+                    self.hwnd, zorder_after, x, y, self.width, self.height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
+        finally:
+            self.allow_geometry = False
+
     def enforce_zorder(self):
-        if self.interactive or self.hidden:
+        if self.interactive or (self.hidden and not self.peeking):
             return
         if self.peeking:
             if not is_topmost(self.hwnd):
@@ -710,11 +749,36 @@ class DesktopLayer:
             SetWindowPos(self.hwnd, HWND_TOP, 0, 0, 0, 0, Z_FLAGS)
 
     def set_peek(self, on):
-        if self.interactive or self.hidden:
+        on = bool(on)
+        if self.interactive or on == self.peeking:
             return
         self.peeking = on
+        cb = self.on_peek_change
+        if self.hidden:
+            if on:
+                if callable(cb):
+                    try:
+                        cb(True)
+                    except Exception:
+                        pass
+                self._show_native(HWND_TOPMOST)
+                self.reposition_pending = False
+            else:
+                if callable(cb):
+                    try:
+                        cb(False)
+                    except Exception:
+                        pass
+                self._hide_native()
+            return
+        if callable(cb):
+            try:
+                cb(on)
+            except Exception:
+                pass
         if on:
-            SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, Z_FLAGS)  # above everything
+            if self.hwnd:
+                SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, Z_FLAGS)  # above everything
         else:
             self.enforce_zorder()                                        # back to desktop
 
@@ -730,42 +794,12 @@ class DesktopLayer:
                 if self.hwnd:
                     self._apply_window_styles()
             self.hidden = True
-            self.allow_geometry = True
-            try:
-                try:
-                    self.root.withdraw()
-                except Exception:
-                    pass
-                if self.hwnd:
-                    SetWindowPos(
-                        self.hwnd, 0, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW,
-                    )
-            finally:
-                self.allow_geometry = False
+            self._hide_native()
         else:
             self.hidden = False
-            self.allow_geometry = True
-            try:
-                try:
-                    self.root.deiconify()
-                    self.root.update_idletasks()
-                    self.root.attributes("-alpha", self._opacity())
-                except Exception:
-                    pass
-                if self.hwnd:
-                    self._apply_window_styles()
-                    x, y = self._target_position()
-                    SetWindowPos(
-                        self.hwnd, 0, x, y, self.width, self.height,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                    )
-                    try:
-                        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
-                    except Exception:
-                        pass
-            finally:
-                self.allow_geometry = False
+            self.peeking = False
+            target = self._zorder_target() if self.hwnd else None
+            self._show_native(target if target is not None else HWND_TOP)
             self.reposition_pending = False
             self.enforce_zorder()
 
@@ -791,7 +825,7 @@ class DesktopLayer:
     # ---------- periodic work -----------------------------------------------------------
     def poll(self):
         """Call every KEY_POLL_MS from the Tk loop."""
-        if not self.interactive and not self.hidden:
+        if not self.interactive:
             want_peek = (self.hotkeys.peek_key_down and key_down(VK_MENU)
                          and not key_down(VK_CONTROL) and not key_down(VK_SHIFT))
             if want_peek != self.peeking:
@@ -799,7 +833,7 @@ class DesktopLayer:
         self._poll_elapsed += KEY_POLL_MS
         if self._poll_elapsed >= ZORDER_CHECK_MS:
             self._poll_elapsed = 0
-            if not self.hidden:
+            if not self.hidden or self.peeking:
                 if self.reposition_pending:
                     self.reposition_pending = False
                     self._reposition()

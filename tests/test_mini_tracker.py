@@ -824,3 +824,36 @@ def test_privacy_hide_withdraws_mini_tracker_and_restores_preserving_enabled_sta
     assert layer_hidden == [True, False, True, False]
     price_texts = [w["price_lbl"].cget("text").strip() for w in view.mini._row_widgets]
     assert "218.40" in price_texts
+
+
+def test_mini_tracker_hidden_start_and_workarea_clamp_on_restore(tk_app, monkeypatch):
+    root, ctrl, view, layer, st = tk_app
+    layer.peeking = False
+    layer.set_hidden = lambda on: None
+
+    # Starting Mini Tracker while already privacy-hidden creates it withdrawn without initial flash
+    view.set_hidden(True)
+    view.toggle_mini()
+    assert view.mini_open is True
+    assert view.mini._privacy_hidden is True
+    assert view.mini._placed is False
+    assert view.mini.state() == "withdrawn"
+
+    # Peeking Main Widget does not show Mini Tracker
+    layer.peeking = True
+    layer.on_peek_change(True)
+    view.refresh()
+    assert view.mini.state() == "withdrawn"
+    layer.peeking = False
+    layer.on_peek_change(False)
+
+    # Even if saved position is off-screen (e.g., monitor disconnected while hidden), restoring clamps to active work area
+    ctrl.set_mini_tracker_state({"pos_x": 9999, "pos_y": 9999})
+    view.set_hidden(False)
+    root.update()
+    assert view.mini._placed is True
+    assert view.mini.state() != "withdrawn"
+    l, t, r, b = _work_area_for_rect(view.mini.winfo_x(), view.mini.winfo_y(),
+                                     view.mini.winfo_width(), view.mini.winfo_height())
+    assert l <= view.mini.winfo_x() <= r - view.mini.winfo_width()
+    assert t <= view.mini.winfo_y() <= b - view.mini.winfo_height()

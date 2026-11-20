@@ -388,15 +388,17 @@ def test_privacy_hide_and_show_keeps_background_alerts_running(app):
     a = Alert(id="priv-1", operator="greater_than", value=Dc("210.00"), label="SELL", priority="HIGH")
     ctrl.save_alert("AAPL", a, choice="wait_cross")
 
-    # Toggle hidden via EditPanel "Hide" button (exits edit mode cleanly)
+    # Toggle hidden via EditPanel "Hide" button (exits edit mode cleanly with zero desktop flash)
     view.enter_edit()
     assert view.editing is True
+    calls_before_hide = len(layer.interactive_calls)
     top = view.panel.winfo_children()[0]
     hide_btn = [b for b in top.winfo_children() if b.cget("text") == "Hide"][0]
     assert top.winfo_children()[-1].cget("text") == "Exit edit mode"
     hide_btn.invoke()
     assert view.hidden is True
     assert view.editing is False
+    assert len(layer.interactive_calls) == calls_before_hide
     assert layer_hidden_calls == [True]
 
     # While hidden: background ticks and alerts continue firing; refresh() stays a no-op
@@ -421,3 +423,45 @@ def test_privacy_hide_and_show_keeps_background_alerts_running(app):
     assert view.editing is True
     assert layer_hidden_calls == [True, False, True, False]
     view.exit_edit()
+
+
+def test_peek_while_hidden_refreshes_prices_and_hides_again_on_release(app):
+    root, ctrl, view, layer, st, quits = app
+    layer.peeking = False
+    layer.set_hidden = lambda on: None
+
+    # Open Mini Tracker first, then hide everything
+    view.toggle_mini()
+    assert view.mini_open is True
+    view.set_hidden(True)
+    assert view.hidden is True
+    assert view.mini.state() == "withdrawn"
+
+    # Tick arrives while hidden -> canvas is stale until peek starts
+    ctrl.on_ticks([tick("222.50", "AAPL", T0, 200)], T0)
+    view.refresh()
+    assert "222.50" not in texts(view.canvas)
+
+    # Hold Alt+W -> renders fresh 222.50, live ticks update to 224.00, while hidden stays True and Mini Tracker stays withdrawn
+    layer.peeking = True
+    layer.on_peek_change(True)
+    assert "222.50" in texts(view.canvas)
+    assert view.hidden is True
+    assert view.mini.state() == "withdrawn"
+
+    ctrl.on_ticks([tick("224.00", "AAPL", T0, 200)], T0)
+    view.refresh()
+    assert "224.00" in texts(view.canvas)
+    assert view.mini.state() == "withdrawn"
+
+    # Release Alt+W -> clears tooltip/pulse, stays hidden
+    view.show_tooltip("status_clocks")
+    layer.peeking = False
+    layer.on_peek_change(False)
+    assert view.hidden is True
+    assert view._active_tooltip_tag is None
+    assert view._pulse_job is None
+
+    ctrl.on_ticks([tick("226.00", "AAPL", T0, 200)], T0)
+    view.refresh()
+    assert "226.00" not in texts(view.canvas)

@@ -302,6 +302,10 @@ class WidgetView:
         self._tip_lbl: tk.Label | None = None
         self.mini: MiniTrackerWindow | None = None
         self.hidden: bool = False
+        try:
+            self.layer.on_peek_change = self._on_peek_change
+        except Exception:
+            pass
         self.ctrl.add_quote_listener(lambda: self.root.after(0, self._refresh_mini))
         if callable(getattr(getattr(self.ctrl, "notifier", None), "add_listener", None)):
             self.ctrl.notifier.add_listener(lambda: self.root.after(0, self._refresh_mini))
@@ -319,6 +323,23 @@ class WidgetView:
     def editing(self) -> bool:
         return self.panel is not None
 
+    @property
+    def peeking(self) -> bool:
+        return bool(getattr(self.layer, "peeking", False))
+
+    def _on_peek_change(self, on: bool) -> None:
+        if on:
+            if self.hidden and not self.editing:
+                self.render()
+        else:
+            self.hide_tooltip()
+            if self.hidden and self._pulse_job is not None:
+                try:
+                    self.root.after_cancel(self._pulse_job)
+                except tk.TclError:
+                    pass
+                self._pulse_job = None
+
     def flashing(self) -> set:
         now = time.monotonic()
         self._flash = {k: v for k, v in self._flash.items() if v > now}
@@ -331,13 +352,14 @@ class WidgetView:
         self.root.after(ms + 60, lambda: (self.refresh(), self._refresh_mini()))
 
     def refresh(self):
-        if self.hidden:
+        if self.hidden and not self.peeking:
             return
         if self.editing:
             self.panel.refresh()
         else:
             self.render()
-        self._refresh_mini()
+        if not self.hidden:
+            self._refresh_mini()
 
     def _t(self, x, y, text, fill, font, anchor="nw", width=None, tags=()):
         c, lk = self.canvas, self.look
@@ -502,7 +524,7 @@ class WidgetView:
 
     def render(self) -> tuple:
         """Draw the corner status strip and stock rows, then fit the window. Returns (width, height)."""
-        if self.editing or self.hidden:
+        if self.editing or (self.hidden and not self.peeking):
             return (0, 0)
         now = self.now_fn()
         c, lk, f, fb = self.canvas, self.look, self.f, self.fb
@@ -885,7 +907,7 @@ class WidgetView:
         self._touch()
         self._schedule_idle()
 
-    def exit_edit(self):
+    def exit_edit(self, *, hide_after: bool = False):
         if not self.editing:
             return
         for w in list(self.root.winfo_children()):
@@ -898,8 +920,9 @@ class WidgetView:
             self._idle_job = None
         self.root.configure(bg=self.bg)
         self.canvas.pack()
-        self.layer.set_interactive(False)          # back on the desktop layer
-        self.render()
+        if not hide_after:
+            self.layer.set_interactive(False)          # back on the desktop layer
+            self.render()
 
     def _touch(self, event=None):
         self._last_activity = time.monotonic()
@@ -959,9 +982,9 @@ class WidgetView:
                     pass
                 self._pulse_job = None
             self.hide_tooltip()
-            if self.editing:
-                self.exit_edit()
             self.hidden = True
+            if self.editing:
+                self.exit_edit(hide_after=True)
             if self.mini_open:
                 self.mini.set_privacy_hidden(True)
             setter = getattr(self.layer, "set_hidden", None)
@@ -1002,9 +1025,8 @@ class WidgetView:
                 on_closed=self._on_mini_closed,
                 get_alert_tooltip=self._mini_alert_tooltip,
                 on_row_double_click=self.open_stock_editor,
+                hidden=self.hidden,
             )
-            if self.hidden:
-                self.mini.set_privacy_hidden(True)
         self.refresh()
 
     def _on_mini_closed(self):

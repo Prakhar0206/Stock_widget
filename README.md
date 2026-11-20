@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-270%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-272%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -17,6 +17,7 @@ An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert en
 ### 🕵️ Privacy Hide / Show Toggle (`Alt + Shift + H`)
 * **Instant Screen Privacy**: Press **`Alt + Shift + H`** anywhere in Windows—or click **`Hide`** in Edit Mode—to immediately hide both the Main Widget and the Floating Mini Tracker when someone is looking at your screen.
 * **Always Active in Background**: Quote polling, alert evaluation, audio alarms, Windows toasts, and alert pop-ups continue running normally while hidden.
+* **Quick Glance While Hidden (`Alt + W`)**: Hold **`Alt + W`** at any time while hidden to temporarily peek the Main Widget on top with the latest refreshed prices; releasing **`Alt + W`** hides it immediately again (Mini Tracker stays hidden).
 * **One-Key Restore**: Press **`Alt + Shift + H`** again (or `Alt + Shift + W` for Edit Mode) to restore the Main Widget and reopen the Mini Tracker if it was active before hiding.
 
 ### 🎯 TradingView-Style Alert System
@@ -152,7 +153,7 @@ Alternatively, specify the keys in `%APPDATA%\StockAlertWidget\config.json`:
 | **`Alt + Shift + W`** | **Toggle Edit Mode** | Brings the widget above other windows (unhiding if hidden) and opens the watchlist & alert manager. `Esc` or 60s of inactivity exits edit mode. |
 | **`Alt + A`** | **Acknowledge Alert** | Acknowledges the latest active alert and cancels repeating `HIGH` alarm reminders. |
 | **`Alt + M`** | **Toggle Mute** | Instantly mutes/unmutes audio chimes and Windows toasts. |
-| **`Alt + W` (Hold)** | **Peek Widget** | Temporarily brings the desktop widget above all open windows while held (disabled while privacy-hidden). |
+| **`Alt + W` (Hold)** | **Peek Widget** | Temporarily brings the Main Widget above all open windows with live prices while held (works even while privacy-hidden, hiding again on release). |
 | **`Ctrl + Alt + Shift + Q`** | **Force Quit** | Closes the widget and cleanly releases all system hooks and mutexes. |
 
 ---
@@ -166,7 +167,7 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 | `run_stock_alert_widget.bat` | Starts the widget in the background via `pythonw.exe` (no console window). |
 | `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with scripted price swings across a safe isolated folder. |
 | `run_stock_alert_widget.bat debug` | Starts in foreground console mode to display live logs and tracebacks. |
-| `run_stock_alert_widget.bat test` | Runs the full 270-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
+| `run_stock_alert_widget.bat test` | Runs the full 272-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
 | `run_stock_alert_widget.bat startup status` | Checks if the Windows Startup shortcut is configured. |
 | `run_stock_alert_widget.bat startup create` | Configures the widget to automatically launch on Windows login. |
 | `run_stock_alert_widget.bat startup remove` | Removes the Windows Startup shortcut. |
@@ -238,31 +239,31 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 270 items
+collected 272 items
 
 tests/test_app_core.py ................                                   [  5%]
 tests/test_audit_and_extended_hours.py .................................  [ 18%]
 tests/test_config_multikey.py ..................                          [ 24%]
 tests/test_config_store.py .....................                          [ 32%]
-tests/test_data_checks.py .......                                         [ 35%]
+tests/test_data_checks.py .......                                         [ 34%]
 tests/test_desktop_layer_stub.py ..........                               [ 38%]
 tests/test_engine.py ...........                                          [ 42%]
-tests/test_finnhub_pool.py ............................                   [ 53%]
-tests/test_finnhub_scheduler.py ...................                       [ 60%]
-tests/test_main_demo.py ........                                          [ 63%]
+tests/test_finnhub_pool.py ............................                   [ 52%]
+tests/test_finnhub_scheduler.py ...................                       [ 59%]
+tests/test_main_demo.py ........                                          [ 62%]
 tests/test_main_multikey.py .........                                     [ 66%]
 tests/test_market_clock.py ......                                         [ 68%]
-tests/test_market_clock_rules.py .......                                  [ 71%]
-tests/test_mini_tracker.py ............................                   [ 81%]
+tests/test_market_clock_rules.py .......                                  [ 70%]
+tests/test_mini_tracker.py .............................                  [ 81%]
 tests/test_notifier.py ...........                                        [ 85%]
 tests/test_pipeline.py .....                                              [ 87%]
 tests/test_positions.py .....                                             [ 89%]
 tests/test_privacy.py ......                                              [ 91%]
 tests/test_replay_soak.py ..                                              [ 92%]
 tests/test_startup_shortcut.py ..                                         [ 93%]
-tests/test_ui_smoke.py ..................                                 [100%]
+tests/test_ui_smoke.py ...................                                [100%]
 
-============================ 270 passed =======================================
+============================ 272 passed =======================================
 ```
 
 ---

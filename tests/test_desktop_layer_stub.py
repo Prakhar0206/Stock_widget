@@ -162,10 +162,12 @@ def test_register_hotkeys_reports_failures_and_uses_norepeat(dl, monkeypatch):
 
 def test_privacy_hide_and_restore_preserves_window_state(dl, monkeypatch):
     layer, root = make(dl)
+    events = []
     swp_calls = []
     desk_calls = []
     reposition_calls = []
-    monkeypatch.setattr(dl, "SetWindowPos", lambda *a: swp_calls.append(a))
+    peek_events = []
+    monkeypatch.setattr(dl, "SetWindowPos", lambda *a: (swp_calls.append(a), events.append(("swp", a[1], a[6]))))
     monkeypatch.setattr(dl, "work_area", lambda: (0, 0, 1920, 1040))
     monkeypatch.setattr(dl, "find_desktop_window", lambda: (desk_calls.append(1), 999)[1])
     monkeypatch.setattr(dl, "is_topmost", lambda h: False)
@@ -173,6 +175,9 @@ def test_privacy_hide_and_restore_preserves_window_state(dl, monkeypatch):
     monkeypatch.setattr(layer, "_apply_window_styles", lambda: None)
     monkeypatch.setattr(layer, "_zorder_target", lambda: 777)
     monkeypatch.setattr(layer, "_reposition", lambda: reposition_calls.append(1))
+    orig_deiconify = root.deiconify
+    monkeypatch.setattr(root, "deiconify", lambda: (orig_deiconify(), events.append(("deiconify",))))
+    layer.on_peek_change = lambda on: peek_events.append(on)
 
     layer.width, layer.height = 400, 150
     layer.peeking = True
@@ -184,7 +189,7 @@ def test_privacy_hide_and_restore_preserves_window_state(dl, monkeypatch):
     assert root.withdrawn == 1
     assert any(c[6] & dl.SWP_HIDEWINDOW for c in swp_calls)
 
-    # While hidden, _on_windowpos_changing strips SWP_SHOWWINDOW, and enforce/peek/poll do nothing
+    # While hidden & not peeking, _on_windowpos_changing strips SWP_SHOWWINDOW, and enforce/poll do nothing
     swp_calls.clear()
     desk_calls.clear()
     wp, addr = _wp(dl, dl.SWP_SHOWWINDOW)
@@ -193,22 +198,52 @@ def test_privacy_hide_and_restore_preserves_window_state(dl, monkeypatch):
     layer.fit(520, 210)
     assert (layer.width, layer.height) == (520, 210)
     assert layer.reposition_pending is True
-    layer.set_peek(True)
-    assert layer.peeking is False
     layer.enforce_zorder()
     assert desk_calls == [] and swp_calls == []
+    monkeypatch.setattr(dl, "key_down", lambda vk: False)
     layer._poll_elapsed = dl.ZORDER_CHECK_MS
     layer.poll()
     assert reposition_calls == [] and desk_calls == []
 
-    # Unhiding restores window cleanly with latest width/height and enforces z-order
+    # Holding Alt+W (peek) while hidden temporarily shows HWND_TOPMOST and hides again on release
     swp_calls.clear()
+    events.clear()
+    layer.hotkeys.peek_key_down = True
+    monkeypatch.setattr(dl, "key_down", lambda vk: vk == dl.VK_MENU)
+    layer._poll_elapsed = 0
+    layer.poll()
+    assert layer.hidden is True and layer.peeking is True
+    assert peek_events == [True]
+    assert any(c[1] == dl.HWND_TOPMOST and (c[6] & dl.SWP_SHOWWINDOW) for c in swp_calls)
+    wp2, addr2 = _wp(dl, dl.SWP_SHOWWINDOW)
+    layer._on_windowpos_changing(addr2)
+    assert wp2.flags & dl.SWP_SHOWWINDOW
+    layer.fit(540, 220)
+    assert (layer.width, layer.height) == (540, 220)
+    layer.enforce_zorder()
+    assert any(c[1] == dl.HWND_TOPMOST for c in swp_calls)
+
+    # Releasing Alt+W immediately hides the widget again while keeping layer.hidden == True
+    swp_calls.clear()
+    layer.hotkeys.peek_key_down = False
+    monkeypatch.setattr(dl, "key_down", lambda vk: False)
+    layer.poll()
+    assert layer.hidden is True and layer.peeking is False
+    assert peek_events == [True, False]
+    assert root.withdrawn == 2
+    assert any(c[6] & dl.SWP_HIDEWINDOW for c in swp_calls)
+
+    # Unhiding positions onto target z-order (777) BEFORE deiconify (no flash on top of other windows)
+    swp_calls.clear()
+    events.clear()
     desk_calls.clear()
     layer.set_hidden(False)
-    assert layer.hidden is False
+    assert layer.hidden is False and layer.peeking is False
     assert layer.reposition_pending is False
-    assert root.deiconified == 1
-    assert any(c[6] & dl.SWP_SHOWWINDOW for c in swp_calls)
+    assert root.deiconified == 2
+    show_idx = next(i for i, e in enumerate(events) if e[0] == "swp" and e[1] == 777 and (e[2] & dl.SWP_SHOWWINDOW))
+    deic_idx = next(i for i, e in enumerate(events) if e[0] == "deiconify")
+    assert show_idx < deic_idx
     assert len(desk_calls) >= 1
 
     # Entering interactive mode while hidden automatically unhides first
