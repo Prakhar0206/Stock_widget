@@ -24,9 +24,16 @@ def dl(monkeypatch):
 class Root:
     def __init__(self):
         self.geo = []
+        self.withdrawn = 0
+        self.deiconified = 0
+        self.attrs = []
 
     def geometry(self, g): self.geo.append(g)
     def update_idletasks(self): pass
+    def withdraw(self): self.withdrawn += 1
+    def deiconify(self): self.deiconified += 1
+    def attributes(self, *a): self.attrs.append(a)
+    def focus_force(self): pass
 
 
 def make(dl, look=None):
@@ -145,5 +152,68 @@ def test_register_hotkeys_reports_failures_and_uses_norepeat(dl, monkeypatch):
     layer, _ = make(dl)
     got = []
     monkeypatch.setattr(dl, "RegisterHotKey", lambda h, i, m, vk: got.append((i, m, vk)) or i != 2)
-    failed = layer.register_hotkeys({1: (dl.MOD_ALT | dl.MOD_SHIFT, "W"), 2: (dl.MOD_ALT, "A")})
-    assert failed == [2] and got[0] == (1, dl.MOD_ALT | dl.MOD_SHIFT | dl.MOD_NOREPEAT, 0x57)
+    failed = layer.register_hotkeys({1: (dl.MOD_ALT | dl.MOD_SHIFT, "W"), 2: (dl.MOD_ALT, "A"),
+                                     4: (dl.MOD_ALT | dl.MOD_SHIFT, "H")})
+    assert failed == [2]
+    assert got[0] == (1, dl.MOD_ALT | dl.MOD_SHIFT | dl.MOD_NOREPEAT, 0x57)
+    assert dl.VK_BY_NAME["H"] == 0x48
+    assert got[2] == (4, dl.MOD_ALT | dl.MOD_SHIFT | dl.MOD_NOREPEAT, 0x48)
+
+
+def test_privacy_hide_and_restore_preserves_window_state(dl, monkeypatch):
+    layer, root = make(dl)
+    swp_calls = []
+    desk_calls = []
+    reposition_calls = []
+    monkeypatch.setattr(dl, "SetWindowPos", lambda *a: swp_calls.append(a))
+    monkeypatch.setattr(dl, "work_area", lambda: (0, 0, 1920, 1040))
+    monkeypatch.setattr(dl, "find_desktop_window", lambda: (desk_calls.append(1), 999)[1])
+    monkeypatch.setattr(dl, "is_topmost", lambda h: False)
+    monkeypatch.setattr(layer, "_zorder_ok", lambda desk: False)
+    monkeypatch.setattr(layer, "_apply_window_styles", lambda: None)
+    monkeypatch.setattr(layer, "_zorder_target", lambda: 777)
+    monkeypatch.setattr(layer, "_reposition", lambda: reposition_calls.append(1))
+
+    layer.width, layer.height = 400, 150
+    layer.peeking = True
+    layer.interactive = True
+    layer.set_hidden(True)
+    assert layer.hidden is True
+    assert layer.peeking is False
+    assert layer.interactive is False
+    assert root.withdrawn == 1
+    assert any(c[6] & dl.SWP_HIDEWINDOW for c in swp_calls)
+
+    # While hidden, _on_windowpos_changing strips SWP_SHOWWINDOW, and enforce/peek/poll do nothing
+    swp_calls.clear()
+    desk_calls.clear()
+    wp, addr = _wp(dl, dl.SWP_SHOWWINDOW)
+    layer._on_windowpos_changing(addr)
+    assert not (wp.flags & dl.SWP_SHOWWINDOW)
+    layer.fit(520, 210)
+    assert (layer.width, layer.height) == (520, 210)
+    assert layer.reposition_pending is True
+    layer.set_peek(True)
+    assert layer.peeking is False
+    layer.enforce_zorder()
+    assert desk_calls == [] and swp_calls == []
+    layer._poll_elapsed = dl.ZORDER_CHECK_MS
+    layer.poll()
+    assert reposition_calls == [] and desk_calls == []
+
+    # Unhiding restores window cleanly with latest width/height and enforces z-order
+    swp_calls.clear()
+    desk_calls.clear()
+    layer.set_hidden(False)
+    assert layer.hidden is False
+    assert layer.reposition_pending is False
+    assert root.deiconified == 1
+    assert any(c[6] & dl.SWP_SHOWWINDOW for c in swp_calls)
+    assert len(desk_calls) >= 1
+
+    # Entering interactive mode while hidden automatically unhides first
+    layer.set_hidden(True)
+    assert layer.hidden is True
+    layer.set_interactive(True)
+    assert layer.hidden is False
+    assert layer.interactive is True

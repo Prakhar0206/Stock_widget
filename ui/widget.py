@@ -65,6 +65,8 @@ class EditPanel(tk.Frame):
         self.btn_mini.pack(side="left", padx=6)
         button(top, "API Keys", self._open_keys_status).pack(side="left", padx=6)
         button(top, "Test Alert", self._test_alert).pack(side="left", padx=6)
+        self.btn_hide = button(top, "Hide", view.toggle_hidden)
+        self.btn_hide.pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
@@ -299,6 +301,7 @@ class WidgetView:
         self._tip_win: tk.Toplevel | None = None
         self._tip_lbl: tk.Label | None = None
         self.mini: MiniTrackerWindow | None = None
+        self.hidden: bool = False
         self.ctrl.add_quote_listener(lambda: self.root.after(0, self._refresh_mini))
         if callable(getattr(getattr(self.ctrl, "notifier", None), "add_listener", None)):
             self.ctrl.notifier.add_listener(lambda: self.root.after(0, self._refresh_mini))
@@ -328,6 +331,8 @@ class WidgetView:
         self.root.after(ms + 60, lambda: (self.refresh(), self._refresh_mini()))
 
     def refresh(self):
+        if self.hidden:
+            return
         if self.editing:
             self.panel.refresh()
         else:
@@ -497,7 +502,7 @@ class WidgetView:
 
     def render(self) -> tuple:
         """Draw the corner status strip and stock rows, then fit the window. Returns (width, height)."""
-        if self.editing:
+        if self.editing or self.hidden:
             return (0, 0)
         now = self.now_fn()
         c, lk, f, fb = self.canvas, self.look, self.f, self.fb
@@ -859,6 +864,8 @@ class WidgetView:
     def enter_edit(self):
         if self.editing:
             return
+        if self.hidden:
+            self.set_hidden(False)
         self.hide_tooltip()
         self.layer.set_interactive(True)
         self.canvas.pack_forget()
@@ -936,6 +943,39 @@ class WidgetView:
                 self._idle_job = self.root.after(1000, check)
         self._idle_job = self.root.after(1000, check)
 
+    def toggle_hidden(self) -> None:
+        self.set_hidden(not self.hidden)
+
+    def set_hidden(self, on: bool) -> None:
+        """Privacy hide/show for Main Widget and Mini Tracker while alerts continue running."""
+        on = bool(on)
+        if on == self.hidden:
+            return
+        if on:
+            if self._pulse_job is not None:
+                try:
+                    self.root.after_cancel(self._pulse_job)
+                except tk.TclError:
+                    pass
+                self._pulse_job = None
+            self.hide_tooltip()
+            if self.editing:
+                self.exit_edit()
+            self.hidden = True
+            if self.mini_open:
+                self.mini.set_privacy_hidden(True)
+            setter = getattr(self.layer, "set_hidden", None)
+            if callable(setter):
+                setter(True)
+        else:
+            self.hidden = False
+            self.render()
+            setter = getattr(self.layer, "set_hidden", None)
+            if callable(setter):
+                setter(False)
+            if self.mini_open:
+                self.mini.set_privacy_hidden(False)
+
     # ---- mini tracker ------------------------------------------------------------------------------
     def open_stock_editor(self, symbol: str) -> None:
         if not self.editing:
@@ -963,6 +1003,8 @@ class WidgetView:
                 get_alert_tooltip=self._mini_alert_tooltip,
                 on_row_double_click=self.open_stock_editor,
             )
+            if self.hidden:
+                self.mini.set_privacy_hidden(True)
         self.refresh()
 
     def _on_mini_closed(self):
@@ -970,6 +1012,8 @@ class WidgetView:
         self.refresh()
 
     def _refresh_mini(self):
+        if self.hidden:
+            return
         if self.mini is not None and self.mini.winfo_exists():
             self.mini.refresh()
 

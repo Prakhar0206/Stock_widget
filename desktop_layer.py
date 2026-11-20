@@ -282,7 +282,7 @@ WM_POWERBROADCAST, WM_HOTKEY, WM_WTSSESSION_CHANGE, WM_DPICHANGED = 0x0218, 0x03
 PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC = 0x0007, 0x0012
 WTS_CONSOLE_CONNECT, WTS_REMOTE_CONNECT, WTS_SESSION_UNLOCK = 0x1, 0x3, 0x8
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
-VK_BY_NAME = {"W": 0x57, "A": 0x41, "M": 0x4D}
+VK_BY_NAME = {"W": 0x57, "A": 0x41, "M": 0x4D, "H": 0x48}
 
 
 def set_dpi_aware():
@@ -419,6 +419,7 @@ class DesktopLayer:
         self.root, self.look = root, look
         self.peeking = False          # True while Alt+W is held
         self.interactive = False      # True in edit mode: clicks + keyboard focus
+        self.hidden = False           # True while privacy-hidden: withdrawn, alerts stay active
         self.allow_geometry = True    # only our own code may move/resize
         self.raw_zorder = False       # bypass z-order rewriting (internal use)
         self.reposition_pending = False
@@ -559,6 +560,10 @@ class DesktopLayer:
         if self.hwnd is None:                        # before attach(): just remember the size
             self.width, self.height = width, height
             return
+        if self.hidden:
+            self.width, self.height = width, height
+            self.reposition_pending = True
+            return
         self.width, self.height = width, height
         x, y = self._target_position()
         self.allow_geometry = True
@@ -639,6 +644,11 @@ class DesktopLayer:
     def _on_windowpos_changing(self, lparam):
         """Every move/resize/z-order change passes through here first."""
         wp = WINDOWPOS.from_address(lparam)
+        if self.hidden:
+            if not self.allow_geometry:
+                wp.flags |= SWP_NOMOVE | SWP_NOSIZE
+                wp.flags &= ~SWP_SHOWWINDOW          # stay hidden until set_hidden(False)
+            return
         if not self.allow_geometry:
             wp.flags |= SWP_NOMOVE | SWP_NOSIZE      # locked in place
             wp.flags &= ~SWP_HIDEWINDOW              # nothing may hide us
@@ -679,7 +689,7 @@ class DesktopLayer:
         return w == self.hwnd
 
     def enforce_zorder(self):
-        if self.interactive:
+        if self.interactive or self.hidden:
             return
         if self.peeking:
             if not is_topmost(self.hwnd):
@@ -700,7 +710,7 @@ class DesktopLayer:
             SetWindowPos(self.hwnd, HWND_TOP, 0, 0, 0, 0, Z_FLAGS)
 
     def set_peek(self, on):
-        if self.interactive:
+        if self.interactive or self.hidden:
             return
         self.peeking = on
         if on:
@@ -708,10 +718,63 @@ class DesktopLayer:
         else:
             self.enforce_zorder()                                        # back to desktop
 
+    def set_hidden(self, on: bool) -> None:
+        """Hide or restore the desktop widget while keeping HWND, WM_HOTKEY, and background timers alive."""
+        on = bool(on)
+        if on == self.hidden:
+            return
+        if on:
+            self.peeking = False
+            if self.interactive:
+                self.interactive = False
+                if self.hwnd:
+                    self._apply_window_styles()
+            self.hidden = True
+            self.allow_geometry = True
+            try:
+                try:
+                    self.root.withdraw()
+                except Exception:
+                    pass
+                if self.hwnd:
+                    SetWindowPos(
+                        self.hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+                    )
+            finally:
+                self.allow_geometry = False
+        else:
+            self.hidden = False
+            self.allow_geometry = True
+            try:
+                try:
+                    self.root.deiconify()
+                    self.root.update_idletasks()
+                    self.root.attributes("-alpha", self._opacity())
+                except Exception:
+                    pass
+                if self.hwnd:
+                    self._apply_window_styles()
+                    x, y = self._target_position()
+                    SetWindowPos(
+                        self.hwnd, 0, x, y, self.width, self.height,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    )
+                    try:
+                        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+                    except Exception:
+                        pass
+            finally:
+                self.allow_geometry = False
+            self.reposition_pending = False
+            self.enforce_zorder()
+
     # ---------- edit mode -----------------------------------------------------------
     def set_interactive(self, on: bool):
         """Edit mode: accept clicks and keyboard focus, above other windows.
         Leaving returns the widget to the desktop layer."""
+        if on and self.hidden:
+            self.set_hidden(False)
         if on == self.interactive:
             return
         if on and self.peeking:
@@ -728,7 +791,7 @@ class DesktopLayer:
     # ---------- periodic work -----------------------------------------------------------
     def poll(self):
         """Call every KEY_POLL_MS from the Tk loop."""
-        if not self.interactive:
+        if not self.interactive and not self.hidden:
             want_peek = (self.hotkeys.peek_key_down and key_down(VK_MENU)
                          and not key_down(VK_CONTROL) and not key_down(VK_SHIFT))
             if want_peek != self.peeking:
@@ -736,7 +799,8 @@ class DesktopLayer:
         self._poll_elapsed += KEY_POLL_MS
         if self._poll_elapsed >= ZORDER_CHECK_MS:
             self._poll_elapsed = 0
-            if self.reposition_pending:
-                self.reposition_pending = False
-                self._reposition()
-            self.enforce_zorder()
+            if not self.hidden:
+                if self.reposition_pending:
+                    self.reposition_pending = False
+                    self._reposition()
+                self.enforce_zorder()

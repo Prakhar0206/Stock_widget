@@ -21,7 +21,7 @@ from config import (BudgetError, Config, check_budget, data_dir,
 from market_clock import Session
 
 log = logging.getLogger("saw.main")
-HK_EDIT, HK_ACK, HK_MUTE = 1, 2, 3            # Alt+Shift+W, Alt+A, Alt+M
+HK_EDIT, HK_ACK, HK_MUTE, HK_HIDE = 1, 2, 3, 4   # Alt+Shift+W, Alt+A, Alt+M, Alt+Shift+H
 PUMP_MS, DRAIN_MS, HOUSEKEEP_MS = 40, 250, 5000
 WAKE_GAP_S = 30                                # a timer that fires 30 s late means the PC slept
 DEMO_POLL_S = 15                               # demo prices move quickly; 15 s keeps the call budget valid
@@ -269,9 +269,18 @@ def run(argv=None) -> None:
         w, h = view.render()
         layer.attach(w, h, hook=cfg.hotkeys_enabled)
         if cfg.hotkeys_enabled:
-            failed = layer.register_hotkeys({HK_EDIT: (dl.MOD_ALT | dl.MOD_SHIFT, "W"), HK_ACK: (dl.MOD_ALT, "A"),
-                                             HK_MUTE: (dl.MOD_ALT, "M")})
-            names = {HK_EDIT: "Alt+Shift+W", HK_ACK: "Alt+A", HK_MUTE: "Alt+M"}
+            failed = layer.register_hotkeys({
+                HK_EDIT: (dl.MOD_ALT | dl.MOD_SHIFT, "W"),
+                HK_ACK: (dl.MOD_ALT, "A"),
+                HK_MUTE: (dl.MOD_ALT, "M"),
+                HK_HIDE: (dl.MOD_ALT | dl.MOD_SHIFT, "H"),
+            })
+            names = {
+                HK_EDIT: "Alt+Shift+W",
+                HK_ACK: "Alt+A",
+                HK_MUTE: "Alt+M",
+                HK_HIDE: "Alt+Shift+H",
+            }
             for hid in failed:
                 ctrl.warnings.append(f"Hotkey {names[hid]} is used by another program and was not registered.")
         ctrl.housekeeping(utcnow())
@@ -296,6 +305,8 @@ def run(argv=None) -> None:
                     elif hid == HK_MUTE:
                         notifier.toggle_mute()
                         view.refresh()
+                    elif hid == HK_HIDE:
+                        view.toggle_hidden()
                 if layer.quit_requested:
                     quit_app()
                     return

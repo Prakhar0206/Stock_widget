@@ -2,11 +2,11 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-297%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-270%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
-An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert engine for US equities. It lives unobtrusively on your Windows desktop wallpaper, monitors regular and extended market sessions, rotates across a pool of up to 4 Finnhub API keys every 15 seconds, and alerts you the moment prices enter your target buy/sell zones or custom price triggers.
+An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert engine for US equities. It lives unobtrusively on your Windows desktop wallpaper, monitors Pre-Market (`PH`), Regular Hours (`RH`), and After-Hours (`AH`) sessions across a 4-key Finnhub pool every 15 seconds, and delivers customizable TradingView-style price and percentage alerts with multi-tier desktop pop-ups, toasts, and audio alarms.
 
 > **Disclaimer**: This is an **alert-only** notification tool. It does **not** connect to any brokerage, never places orders, and does not provide financial or trading advice.
 
@@ -14,54 +14,59 @@ An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert en
 
 ## Highlights & Features
 
+### 🕵️ Privacy Hide / Show Toggle (`Alt + Shift + H`)
+* **Instant Screen Privacy**: Press **`Alt + Shift + H`** anywhere in Windows—or click **`Hide`** in Edit Mode—to immediately hide both the Main Widget and the Floating Mini Tracker when someone is looking at your screen.
+* **Always Active in Background**: Quote polling, alert evaluation, audio alarms, Windows toasts, and alert pop-ups continue running normally while hidden.
+* **One-Key Restore**: Press **`Alt + Shift + H`** again (or `Alt + Shift + W` for Edit Mode) to restore the Main Widget and reopen the Mini Tracker if it was active before hiding.
+
+### 🎯 TradingView-Style Alert System
+* **Immediate Atomic Persistence**: Creating, editing, toggling, or deleting an alert saves immediately to `watchlist.json` and `state.json`—never lost if you close Edit Mode without a second save click.
+* **`Price ($)` and `Percent (%)` Conditions**:
+  * **`Price ($)`**: Trigger against explicit dollar thresholds or upper/lower channel bounds.
+  * **`Percent (%)`**: Calculates targets against your manual **`Buy Price`** (with optional manual `(buy_price * shares + fees) / shares` adjustment for `HOLD`/`SELL`), **`Sell Price`**, or a clean fallback to **`Previous Close`** (e.g., on `WATCH` stocks) with live `$` target previews.
+* **All 13 Operators**:
+  * **Primary**: `Crossing`, `Crossing Up`, `Crossing Down`, `Greater Than`, `Less Than`.
+  * **Expanded (`Show more ▾`)**: `Entering Channel`, `Exiting Channel`, `Inside Channel`, `Outside Channel`, `Moving Up ($)`, `Moving Down ($)`, `Moving Up %`, `Moving Down %` (over a configurable time window).
+* **Trigger Modes, Expirations & Session Scopes**:
+  * **Triggers**: `Once only` (auto-disarms when hit; 1-click re-enable), `Every time` (with configurable minute cooldown), or `Once per cross (Re-arm)` (re-arms automatically after hysteresis cross-back).
+  * **Expirations**: `Open-ended`, `End of trading session`, `End of next trading session`, `1 week`, `1 month`, or `Custom date & time`.
+  * **Session Scope**: Restrict any alert to `All Sessions (PH + RH + AH)`, `Regular Hours Only (RH)`, or `Extended Hours Only (PH + AH)`.
+* **Custom Messages & Optional Manual Trade Fields**:
+  * Customize optional alert names and templates under **`< Edit message`** with clickable placeholder chips (`{{ticker}}`, `{{price}}`, `{{target}}`, `{{change_pct}}`, `{{session}}`, `{{time}}`).
+  * Tag alerts with `BUY`, `HOLD`, `SELL`, `WATCH`, or `RISK`.
+  * Optional manual trade fields (`Buy Price`, `Shares`, `Sell Price`, `Fees`) on any category (`BUY`, `HOLD`, `SELL`, `WATCH`), plus an optional 2-reading confirmation (`Noisy stock`) filter to suppress 1-tick spikes.
+
+### 🔔 Shifted Multi-Tier Notifications & Centered Alert Card
+* **`LOW` (Standard)**: Row highlight flash + Mini Tracker alert pill + Windows Toast + single chime (no pop-up).
+* **`MEDIUM` (Important)**: Row highlight flash + Mini Tracker alert pill + centered 10s dark-card Desktop Overlay Popup + Windows Toast + 5s alert sound.
+* **`HIGH` (Persistent Alarm)**: Row highlight flash + Mini Tracker critical pill (`🚨`) + centered 10s dark-card Desktop Overlay Popup + persistent Windows Toast + 10s alarm sound + **auto-repeats every 2 minutes until acknowledged** (`Alt + A`, popup **Acknowledge** / `✕`, or clicking the Mini Tracker alert pill).
+* **`CUSTOM...`**: Open **`< Notifications`** to pick bespoke combinations of Desktop Popup, Windows Toast, Sound Tone (`none`, `chime`, `beep`, `bell`, `alarm`), Sound Duration (`Once`, `5s`, `10s`, `30s`), and Repeat-until-acknowledged.
+* **Centered Dark-Card Pop-Up & Diagnostics**: Styled priority card (`alert` strip, ticker/price hero row, condition summary, source/data age) centered on the active monitor work area without stealing focus, plus a **`Test Alert`** button in Edit Mode and optional **IST Quiet Hours**.
+
 ### 🪟 Floating Mini Tracker HUD (Always-on-Top)
-* **Translucent Dark Panel**: A compact, always-on-top floating companion matching the main widget palette (`#202020`/`#2D2D2D` dark cards with 92% opacity), freely draggable at any time with saved monitor-clamped position.
-* **Compact Single-Price View**: Shows `Symbol`, latest `Price`, directional arrow, and `% Change`, scrolling smoothly for larger watchlists.
-* **Dynamic Alert Pill**: The center header turns into an animated alert pill (`🔔` / `🚨`) showing the active alert count and letting you acknowledge active alerts and silence chimes with a single click.
+* **Translucent Dark Panel**: Compact, always-on-top floating companion matching the main widget palette (`#202020`/`#2D2D2D` dark cards with `#444444` outlines and 92% opacity), freely draggable with saved monitor-clamped coordinates.
+* **In-Place Updates & Overflow Indicators**: Shows `Symbol`, latest `Price`, directional arrow, and `% Change` with flicker-free in-place updates and clickable `▲` / `▼` overflow indicators on long watchlists.
+* **Dynamic Alert Pill & Hover Summary**: Center header turns into a colored alert pill (`🔔` / `🚨`) displaying the live alert count, a hover tooltip with the latest alert details, and 1-click acknowledgment.
+* **Double-Click to Edit**: Double-clicking any stock row opens Edit Mode directly expanded to that stock.
 * **Category & Unlimited Ticker Checklist**: Filter on the fly with category pills (`ALL`, `SELL`, `HOLD`, `BUY`, `WATCH`) and an unlimited scrollable ticker checklist (empty selection shows all stocks).
-* **Header Mini Switch**: Toggle the Mini Tracker directly from the `Mini` pill switch on the far right of the main widget status bar or via the **Mini Tracker** button in Edit Mode.
+* **Header Mini Switch & Settings Gear (`⚙`)**: Toggle the Mini Tracker directly from the `Mini` pill switch on the far right of the main widget header, or click the adjacent `⚙` icon to open Edit Mode.
 
 ### 🕒 Extended Hours Market Support (`PH` / `RH` / `AH`)
-* **Separate Session Columns**: The main desktop HUD and Edit Mode display dedicated Pre-Market (`PH`), Regular Hours (`RH`), and After-Hours (`AH`) price columns alongside the latest directional change (`▲`/`▼` `%`). The currently active market session (`PRE`, `REGULAR`, `AFTER`) is highlighted in full color while inactive sessions dim cleanly.
-* **Yahoo Finance Supplementation**: When `extended_hours` is enabled in `Config` (on by default), Yahoo Finance extended-hours quotes (`preMarketPrice`, `postMarketPrice`, and 1-minute extended-session bars) supplement Finnhub quotes so `PH`, `RH`, and `AH` retain and display the last trading day's session prices across `CLOSED`, `PRE`, `REGULAR`, and `AFTER` (with live `PRE`/`AFTER`/`CLOSED` updates and 15-minute cached `PH`/`AH` backfill during `REGULAR`).
+* **Separate Session Columns**: The main desktop HUD and Edit Mode display dedicated Pre-Market (`PH`), Regular Hours (`RH`), and After-Hours (`AH`) columns alongside the latest directional change (`▲`/`▼` `%`). Active session numbers highlight while closed markets switch to a calm, uniform silver/muted off-hours palette.
+* **Yahoo Finance Supplementation**: When `extended_hours` is enabled in `Config` (on by default), Yahoo Finance extended-hours chart metadata and 1-minute extended-session bars supplement Finnhub quotes so `PH`, `RH`, and `AH` display live extended prices and retain the last trading day's session closes across `CLOSED`, `PRE`, `REGULAR`, and `AFTER` (with 15-minute cached backfill during `REGULAR`).
 
-### 🚀 High-Frequency Finnhub Key Pool (15s Updates)
-* **4-Key Round-Robin Rotation**: Distributes quote fetches across up to 4 Finnhub free-tier keys, unlocking **15-second live updates** during regular market hours ($4 \times 48 = 192$ calls/min budget, safely within the 30-symbol allowance).
-* **In-Slot Partial Failover**: If a key throttles partway through a batch (e.g., after 6 of 10 symbols), the received quotes are retained and the remaining 4 symbols immediately fail over to the next healthy key in the pool.
-* **Per-Key Progressive Backoff**: Exponential rate-limit handling (60s $\to$ 120s $\to$ 240s) per key on HTTP 429 without stalling the entire feed.
-* **Rejected Key Isolation**: Distinguishes between rate limits (429) and invalid/expired keys (401/403), quarantining bad keys and automatically recovering when credentials are corrected.
+### 🚀 High-Frequency Finnhub Key Pool (Balanced 15s Updates)
+* **Equal Round-Robin Rotation**: Distributes both quote batches and `/stock/market-status` checks evenly across up to 4 Finnhub free-tier keys, maintaining a steady post-fetch **15-second live cadence** ($4 \times 48 = 192$ calls/min budget).
+* **In-Slot Partial Failover**: If a key throttles partway through a batch (e.g., after 6 of 10 symbols), partial quotes are kept and the remaining symbols immediately fail over to the next healthy key in the same slot.
+* **Per-Key Progressive Backoff & Read-Only Status Modal**: Exponential 429 cooldowns (`60s` $\to$ `120s` $\to$ `240s`), 401/403 rejected key isolation with automatic recovery, and a read-only **API Keys & Status** viewer in Edit Mode showing key source, pool health, and per-key call counts.
 
-### 🖥️ Native Windows Desktop Integration
-* **Wallpaper Layer Pinning**: Resides on the Windows desktop layer (`WorkerW`/`Progman`) beneath active apps.
-* **Win+D Immune**: Stays in place when minimizing all windows with `Win+D` or switching virtual desktops.
-* **Non-Intrusive Normal Mode**: Configurable click-through or hover-enabled normal mode (`click_through: false`), allowing rich interactive tooltips without stealing focus from your work.
-* **High-DPI & Multi-Monitor**: Scales cleanly across 100%, 125%, 150%, and multi-monitor setups.
+### 🖥️ Native Windows Desktop & Status Integration
+* **Wallpaper Layer Pinning & `Win+D` Immunity**: Lives on the Windows desktop layer (`WorkerW`/`Progman`) beneath active windows, scales across high-DPI & multi-monitor setups, and supports optional hover tooltips (`click_through: false` by default).
+* **Dynamic Status Strip**: Session icons (`🌅` Pre-Market, `☀️` Regular Open, `🌇` After-Hours, `🌙` Closed), live IST/ET clocks, 30 FPS expanding sonar pulse heartbeat, rich hover tooltips, and specific problem badges (`🚫📶` offline, `⏳` rate-limited keys, `🔑❌` rejected keys, `☁️❌` upstream 5xx/timeout).
 
-### 📊 Dynamic Status Bar & Visual Feedback
-* **Market Session Indicator**: Real-time ☀️ Regular Session vs. 🌙 After-Hours/Weekend/Holiday status with automatic opening bell wake-up.
-* **Expanding Sonar Pulse Heartbeat**: 30 FPS multi-frame ripple animation visually confirms live scheduler ticks.
-* **Rich Hover Tooltips**: Hover over status badges in normal mode to inspect market hours, schedule intervals, and active provider health.
-* **Problem Badges**: Dedicated mini-icons indicate live network disconnections (🔌), rate-limiting (⚡), invalid API keys (🔑), and stale feeds (⏳).
-
-### 🎯 Smart Target Zones & Portfolio Tracking
-* **SELL Stocks**: Tracks unrealized P/L factoring in estimated buy/sell commissions and SEC/FINRA regulatory fees. Dynamically categorizes price action into 7 color-coded zones:
-  - `DEEP LOSS` / `LOSS`
-  - `BELOW BREAKEVEN` / `BREAKEVEN` / `ABOVE BREAKEVEN`
-  - `SELL` / `HIGH SELL`
-* **Automatic Slipping Protection**: Automatically arms a medium-priority alert if a stock in your sell target range reverses and slips below your threshold.
-* **BUY Stocks**: Monitors watchlist entry opportunities with 5 zones (`DEEP DROP`, `ENTRY HIT`, `NEAR ENTRY`, `ABOVE ENTRY`, `FAR ABOVE`).
-* **Hysteresis Filtering**: Prevents alert noise and jitter at zone boundaries using configurable price bands (`standard: 0.5%`, `noisy: 1.0%`).
-
-### 🔔 Multi-Tier Notifications
-* **Desktop Pop-up HUD**: Clean overlay card for HIGH priority alerts that appears above all windows and auto-dismisses after 10s (re-escalates after 2 minutes if unacknowledged).
-* **Native Windows Toasts**: Action Center integration with persistent alarm scenario for urgent alerts.
-* **Non-Blocking Audio**: Distinct sound chimes played from background threads so toasts and sounds never freeze the UI.
-* **IST Quiet Hours**: Optional mute schedule configured for after-hours focus.
-
-### 🔒 100% Private, Local-Only & Masked
-* **Zero Telemetry**: No cloud database, no tracking, and no external connections other than Finnhub quotes.
-* **Strict Redaction**: API keys, share quantities, cost bases, and actual dollar profits are automatically scrubbed from `app.log` and `alerts_log.jsonl`.
-* **Local Data**: All configuration and state files reside strictly in `%APPDATA%\StockAlertWidget`.
+### 🔒 Privacy & Security
+* **100% Local Data**: Zero telemetry or cloud storage. Connects only to Finnhub's quote/status API (plus optional public Yahoo Finance extended-hours chart metadata when `extended_hours` is enabled). All user state lives locally in `%APPDATA%\StockAlertWidget`.
+* **Automatic Redaction & Log Archiving**: API keys (headers, query params, env/config keys) and trade financial figures (`shares`, cost fields) are scrubbed from `app.log`, excluded from `alerts_log.jsonl`, and alert logs older than 60 days automatically archive into `alerts_archive/alerts_log_YYYY-MM.jsonl`.
 
 ---
 
@@ -143,10 +148,11 @@ Alternatively, specify the keys in `%APPDATA%\StockAlertWidget\config.json`:
 
 | Shortcut | Action | Description |
 |---|---|---|
-| **`Alt + Shift + W`** | **Toggle Edit Mode** | Brings the widget above other windows and opens the interactive watchlist manager. Pressing `Esc` or 60s of inactivity exits edit mode. |
-| **`Alt + A`** | **Acknowledge Alert** | Acknowledges the latest active alert and cancels repeating pop-ups. |
-| **`Alt + M`** | **Toggle Mute** | Instantly mutes/unmutes audio chimes and notifications. |
-| **`Alt + W` (Hold)** | **Peek Widget** | Temporarily brings the desktop widget above all open windows while held. |
+| **`Alt + Shift + H`** | **Privacy Hide / Show** | Instantly hides or restores both the Main Widget and Mini Tracker while keeping background polling and alerts running. *(Also available via the **Hide** button in Edit Mode).* |
+| **`Alt + Shift + W`** | **Toggle Edit Mode** | Brings the widget above other windows (unhiding if hidden) and opens the watchlist & alert manager. `Esc` or 60s of inactivity exits edit mode. |
+| **`Alt + A`** | **Acknowledge Alert** | Acknowledges the latest active alert and cancels repeating `HIGH` alarm reminders. |
+| **`Alt + M`** | **Toggle Mute** | Instantly mutes/unmutes audio chimes and Windows toasts. |
+| **`Alt + W` (Hold)** | **Peek Widget** | Temporarily brings the desktop widget above all open windows while held (disabled while privacy-hidden). |
 | **`Ctrl + Alt + Shift + Q`** | **Force Quit** | Closes the widget and cleanly releases all system hooks and mutexes. |
 
 ---
@@ -158,9 +164,9 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 | Command | Description |
 |---|---|
 | `run_stock_alert_widget.bat` | Starts the widget in the background via `pythonw.exe` (no console window). |
-| `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with simulated price swings through all zones. |
+| `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with scripted price swings across a safe isolated folder. |
 | `run_stock_alert_widget.bat debug` | Starts in foreground console mode to display live logs and tracebacks. |
-| `run_stock_alert_widget.bat test` | Runs the full 297-test automated `pytest` suite. |
+| `run_stock_alert_widget.bat test` | Runs the full 270-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
 | `run_stock_alert_widget.bat startup status` | Checks if the Windows Startup shortcut is configured. |
 | `run_stock_alert_widget.bat startup create` | Configures the widget to automatically launch on Windows login. |
 | `run_stock_alert_widget.bat startup remove` | Removes the Windows Startup shortcut. |
@@ -173,26 +179,33 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 
 ```text
 stock_alert_widget/
-├── main.py                  # Entry point, runtime builder, Win32 single-instance mutex
-├── app_core.py              # Main application controller, state machine, poll events
-├── desktop_layer.py         # Win32 desktop pinning, Progman/WorkerW hooks, z-order locking
-├── scheduler.py             # Polling scheduler, clock alignment, off-hours sleep
-├── market_clock.py          # US market hours, calendar sessions, opening bell calculation
-├── config.py                # Config parser, validation, 4-key budget calculator
-├── engine.py                # Zone evaluation, hysteresis filter, alert trigger logic
-├── watchlist.py             # Watchlist model, atomic read/write, backup recovery
-├── positions.py             # Position calculations, buy/sell fees, net P/L estimates
-├── notifier.py              # Windows toast integration, sound player, pop-up dispatcher
-├── store.py                 # File storage, atomic JSON writes, privacy log filter
+├── main.py                  # Entry point, runtime builder, global hotkeys, single-instance mutex
+├── app_core.py              # Main application controller, alert/tick orchestration, status strip views
+├── desktop_layer.py         # Win32 desktop pinning, Progman/WorkerW hooks, peek, hide/show, z-order
+├── scheduler.py             # Polling scheduler, post-fetch cadence alignment, off-hours sleep
+├── market_clock.py          # US market hours, NYSE rule calendar, session & expiration helpers
+├── config.py                # Config parser, validation, multi-key discovery, API budget calculator
+├── models.py                # Domain dataclasses & constants (Alert, TradeInfo, Notification, PriceTick)
+├── engine.py                # TradingView-style 13-operator alert state machine & target resolver
+├── watchlist.py             # Watchlist parser/serializer with legacy migration & budget validation
+├── positions.py             # Decimal trade summary & percentage target math (no guessed fees)
+├── data_checks.py           # Price sanity jump filter, feed health tracker, exponential backoff
+├── messages.py              # Alert & system warning message formatting with template placeholders
+├── notifier.py              # Shifted priority delivery (LOW/MEDIUM/HIGH/CUSTOM), sound, toast & popup
+├── store.py                 # Crash-safe atomic JSON writes, alert log pruning/archiving, PII redaction
 ├── providers/
-│   ├── finnhub.py           # Multi-key pool rotation, in-slot failover, 429 backoff
+│   ├── base.py              # QuoteProvider abstract interface & provider error hierarchy
+│   ├── finnhub.py           # Multi-key round-robin rotation, in-slot failover, 429 backoff, Yahoo PH/AH
 │   └── mock.py              # Demo/mock provider with scripted price trajectories
+├── tools/
+│   ├── startup_shortcut.py  # Windows Startup folder shortcut status/create/remove CLI
+│   └── make_sample_day.py   # Sample fixture generator for replay/soak verification
 └── ui/
-    ├── widget.py            # Canvas HUD view, PH/RH/AH columns, sonar pulse animation, tooltips
-    ├── mini_tracker.py      # Floating always-on-top translucent dark companion HUD
-    ├── editor.py            # Edit mode GUI, stock list, inline row expansion & dialogs
-    ├── popup.py             # Top-level desktop alert card
-    └── common.py            # Shared dark palette, timer helpers & UI widgets
+    ├── widget.py            # Dark-card Canvas HUD, PH/RH/AH columns, sonar pulse, Mini switch, EditPanel
+    ├── mini_tracker.py      # Floating always-on-top companion HUD, overflow indicators, Filter dialog
+    ├── editor.py            # Edit mode StockEditor, TradingView AlertDialog, AddStock & API Keys modals
+    ├── popup.py             # Centered dark-card desktop alert overlay pop-up
+    └── common.py            # Shared dark palette, Tkinter timers & reusable form widgets
 ```
 
 ---
@@ -203,20 +216,21 @@ All runtime and persistent user data is kept isolated in `%APPDATA%\StockAlertWi
 
 | File | Purpose |
 |---|---|
-| `config.json` | General settings (`extended_hours`, polling), look & feel tokens, fee structures, and zone defaults. |
-| `watchlist.json` | Current stock watchlist, positions, and active alert rules. |
+| `config.json` | General settings (`poll_seconds`, `extended_hours`, `default_priority`, `hotkeys_enabled`), `look` appearance tokens, optional `api_keys`, and `quiet_hours_ist`. |
+| `watchlist.json` | Current stock watchlist, optional manual trade details (`buy_price`, `shares`, `sell_price`, `fees`), and alert rules. |
 | `watchlist.last_good.json` | Automatic fallback copy preserved across atomic writes. |
-| `state.json` | Runtime state, last seen prices, and daily close benchmarks. |
-| `alerts_log.jsonl` | Append-only alert log (redacted: no shares, cost basis, or profits). |
+| `state.json` | Runtime state, `PH`/`RH`/`AH` session prices, alert arming/cooldown states, and Mini Tracker layout preferences. |
+| `alerts_log.jsonl` | Append-only alert audit log (redacted: no shares, cost basis, or profits). |
+| `alerts_archive/` | Monthly archives (`alerts_log_YYYY-MM.jsonl`) created when logs older than 60 days are pruned on startup. |
 | `app.log` | Rotating operational log (1 MB $\times$ 3 files, strict key/PII redaction). |
 
 ---
 
 ## Testing & Quality Assurance
 
-The codebase includes an extensive automated test suite covering all business logic, multi-key scheduling, backoff recovery, and UI smoke tests under fake desktop layers.
+The codebase includes an automated test suite covering all business logic, 13 alert operators, shifted notifications, multi-key rotation, privacy hiding, and Tkinter UI flows under fake Win32 layers.
 
-To run the full suite:
+To run the full suite (install dev dependencies from `requirements-dev.txt` first):
 ```powershell
 python -m pytest
 ```
@@ -224,32 +238,31 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 297 items
+collected 270 items
 
-tests/test_app_core.py .......................                           [  7%]
-tests/test_audit_and_extended_hours.py .....................             [ 14%]
-tests/test_config_multikey.py ..................                         [ 20%]
-tests/test_config_store.py ...................                           [ 27%]
-tests/test_data_checks.py .......                                        [ 29%]
-tests/test_desktop_layer_stub.py .........                               [ 32%]
-tests/test_engine.py .......................                             [ 40%]
-tests/test_finnhub_pool.py ...........................                   [ 49%]
-tests/test_finnhub_scheduler.py ...................                      [ 55%]
-tests/test_main_demo.py ........                                         [ 58%]
-tests/test_main_multikey.py .........                                    [ 61%]
-tests/test_market_clock.py ......                                        [ 63%]
-tests/test_market_clock_rules.py .......                                 [ 65%]
-tests/test_mini_tracker.py ...........................                   [ 75%]
-tests/test_notifier.py ................                                  [ 80%]
-tests/test_pipeline.py .....                                             [ 82%]
-tests/test_positions.py .......                                          [ 84%]
-tests/test_privacy.py ......                                             [ 86%]
-tests/test_replay_soak.py ..                                             [ 87%]
-tests/test_startup_shortcut.py ..                                        [ 87%]
-tests/test_ui_smoke.py ....................                              [ 94%]
-tests/test_zones.py ................                                     [100%]
+tests/test_app_core.py ................                                   [  5%]
+tests/test_audit_and_extended_hours.py .................................  [ 18%]
+tests/test_config_multikey.py ..................                          [ 24%]
+tests/test_config_store.py .....................                          [ 32%]
+tests/test_data_checks.py .......                                         [ 35%]
+tests/test_desktop_layer_stub.py ..........                               [ 38%]
+tests/test_engine.py ...........                                          [ 42%]
+tests/test_finnhub_pool.py ............................                   [ 53%]
+tests/test_finnhub_scheduler.py ...................                       [ 60%]
+tests/test_main_demo.py ........                                          [ 63%]
+tests/test_main_multikey.py .........                                     [ 66%]
+tests/test_market_clock.py ......                                         [ 68%]
+tests/test_market_clock_rules.py .......                                  [ 71%]
+tests/test_mini_tracker.py ............................                   [ 81%]
+tests/test_notifier.py ...........                                        [ 85%]
+tests/test_pipeline.py .....                                              [ 87%]
+tests/test_positions.py .....                                             [ 89%]
+tests/test_privacy.py ......                                              [ 91%]
+tests/test_replay_soak.py ..                                              [ 92%]
+tests/test_startup_shortcut.py ..                                         [ 93%]
+tests/test_ui_smoke.py ..................                                 [100%]
 
-============================ 297 passed =======================================
+============================ 270 passed =======================================
 ```
 
 ---

@@ -778,3 +778,49 @@ def test_flashing_row_highlights_with_flash_bg(tk_app):
     rows_after = {r["symbol"]: r for r in view._mini_rows()}
     assert rows_after["AAPL"]["flashing"] is False
     assert view.mini.rows_frame.winfo_children()[idx_aapl].cget("bg").upper() == BG2.upper()
+
+
+def test_privacy_hide_withdraws_mini_tracker_and_restores_preserving_enabled_state(tk_app):
+    root, ctrl, view, layer, st = tk_app
+    layer_hidden = []
+    layer.set_hidden = lambda on: layer_hidden.append(on)
+
+    # Case 1: Mini Tracker closed before hide -> stays closed on unhide
+    assert not view.mini_open
+    view.toggle_hidden()
+    assert view.hidden is True and not view.mini_open
+    view.toggle_hidden()
+    assert view.hidden is False and not view.mini_open
+
+    # Case 2: Mini Tracker open (plus settings dialog open) -> hides both, keeps enabled=True, restores updated prices
+    view.toggle_mini()
+    assert view.mini_open is True
+    assert ctrl.get_mini_tracker_state().get("enabled") is True
+    view.mini.open_settings()
+    settings_dlg = view.mini._settings
+    assert settings_dlg is not None and settings_dlg.winfo_exists()
+
+    view.toggle_hidden()
+    root.update()
+    assert view.hidden is True
+    assert view.mini_open is True
+    assert view.mini._privacy_hidden is True
+    assert view.mini.state() == "withdrawn"
+    assert not settings_dlg.winfo_exists()
+    assert ctrl.get_mini_tracker_state().get("enabled") is True
+
+    # Background price update while hidden does not show Mini Tracker, yet updates data upon restore
+    ctrl.on_ticks([tick("218.40", "AAPL", T0, 200)], T0)
+    view.refresh()
+    assert view.mini._privacy_hidden is True
+    assert view.mini.state() == "withdrawn"
+
+    view.toggle_hidden()
+    root.update()
+    assert view.hidden is False
+    assert view.mini_open is True
+    assert view.mini._privacy_hidden is False
+    assert view.mini.state() != "withdrawn"
+    assert layer_hidden == [True, False, True, False]
+    price_texts = [w["price_lbl"].cget("text").strip() for w in view.mini._row_widgets]
+    assert "218.40" in price_texts

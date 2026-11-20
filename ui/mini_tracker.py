@@ -217,6 +217,7 @@ class MiniTrackerWindow(tk.Toplevel):
         self._tip_lbl = None
         self._alerting = False
         self._overflow = False
+        self._privacy_hidden = False
         self._body_h = self._content_h = 0
 
         self.overrideredirect(True)
@@ -401,6 +402,8 @@ class MiniTrackerWindow(tk.Toplevel):
 
     def refresh(self):
         """Call on every quote update (15s cadence)."""
+        if self._privacy_hidden:
+            return
         if self._dragging:
             self._pending_refresh = True
             return
@@ -567,12 +570,45 @@ class MiniTrackerWindow(tk.Toplevel):
 
     def _flash_tick(self):
         self._flash_on = not self._flash_on
-        for b in getattr(self, "_badges", []):
+        if not self._privacy_hidden:
+            for b in getattr(self, "_badges", []):
+                try:
+                    b.config(fg=AMBER if self._flash_on else "#7A5208")
+                except tk.TclError:
+                    pass
+        self._flash_job = self.after(600, self._flash_tick)
+
+    def set_privacy_hidden(self, hidden: bool) -> None:
+        """Temporarily withdraw or restore Mini Tracker for privacy without changing saved enabled state."""
+        hidden = bool(hidden)
+        if hidden == self._privacy_hidden:
+            return
+        self._privacy_hidden = hidden
+        if hidden:
+            self._drag = None
+            self._dragging = False
+            self._hide_alert_tooltip()
+            if self._settings and self._settings.winfo_exists():
+                try:
+                    self._settings.destroy()
+                except tk.TclError:
+                    pass
+                self._settings = None
             try:
-                b.config(fg=AMBER if self._flash_on else "#7A5208")
+                self.withdraw()
             except tk.TclError:
                 pass
-        self._flash_job = self.after(600, self._flash_tick)
+        else:
+            try:
+                self.deiconify()
+                try:
+                    self.attributes("-topmost", True)
+                except tk.TclError:
+                    pass
+                self.lift()
+            except tk.TclError:
+                pass
+            self.refresh()
 
     # -- settings / close
     def open_settings(self):

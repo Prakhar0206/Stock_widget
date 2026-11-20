@@ -372,3 +372,52 @@ def test_heartbeat_pulse_animation_runs_smoothly(app):
         root.update()
     # At completion of sequence, pulse job clears cleanly
     assert view._pulse_job is None
+
+
+def test_privacy_hide_and_show_keeps_background_alerts_running(app):
+    root, ctrl, view, layer, st, quits = app
+
+    # Spy on set_hidden calls on layer and record alerts in memory/log while hidden
+    layer_hidden_calls = []
+    layer.set_hidden = lambda on: layer_hidden_calls.append(on)
+    fired = []
+    orig_notify = ctrl.notifier.notify
+    ctrl.notifier.notify = lambda note, now=None: (fired.append(note), orig_notify(note))
+
+    # Add a Greater Than alert that triggers above 210
+    a = Alert(id="priv-1", operator="greater_than", value=Dc("210.00"), label="SELL", priority="HIGH")
+    ctrl.save_alert("AAPL", a, choice="wait_cross")
+
+    # Toggle hidden via EditPanel "Hide" button (exits edit mode cleanly)
+    view.enter_edit()
+    assert view.editing is True
+    top = view.panel.winfo_children()[0]
+    hide_btn = [b for b in top.winfo_children() if b.cget("text") == "Hide"][0]
+    assert top.winfo_children()[-1].cget("text") == "Exit edit mode"
+    hide_btn.invoke()
+    assert view.hidden is True
+    assert view.editing is False
+    assert layer_hidden_calls == [True]
+
+    # While hidden: background ticks and alerts continue firing; refresh() stays a no-op
+    before_items = list(view.canvas.find_all())
+    ctrl.on_ticks([tick("215.00", "AAPL", T0, 200)], T0)
+    view.refresh()
+    assert view.hidden is True
+    assert len(fired) == 1 and fired[0].events[0].symbol == "AAPL"
+    assert list(view.canvas.find_all()) == before_items
+
+    # Toggle back to visible: renders latest price & restores layer
+    view.toggle_hidden()
+    assert view.hidden is False
+    assert layer_hidden_calls == [True, False]
+    assert "215.00" in texts(view.canvas)
+
+    # Entering edit mode while hidden automatically unhides first
+    view.set_hidden(True)
+    assert view.hidden is True
+    view.enter_edit()
+    assert view.hidden is False
+    assert view.editing is True
+    assert layer_hidden_calls == [True, False, True, False]
+    view.exit_edit()
