@@ -470,11 +470,12 @@ def test_ui_inbox_dialog_widget_badge_and_mini_tracker(tmp_path):
         assert any("🔔 2" in c.itemcget(i, "text") for i in c.find_withtag("status_inbox_badge")
                    if c.type(i) == "text")
 
-        # Edit Mode Alerts (2) & Restart (↻) buttons appear before Quit / Exit edit mode
+        # Edit Mode Alerts (2) appears before Quit / Exit edit mode; Restart (↻) sits in bottom-right footer
         view.enter_edit()
         assert "Alerts (2)" in view.panel.btn_alerts.cget("text")
         top_frame = view.panel.btn_alerts.master
         assert top_frame.winfo_children()[-1].cget("text") == "Exit edit mode"
+        assert view.panel.btn_restart.master is not top_frame
         assert view.panel.btn_restart.cget("text") == "↻"
         view.panel.btn_restart.invoke()
         assert restarts == [1]
