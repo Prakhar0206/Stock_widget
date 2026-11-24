@@ -1,4 +1,4 @@
-"""Unacknowledged Alerts Inbox UI (Item 6.1): dark-card review dialog for missed live & offline alerts."""
+"""Unacknowledged Alerts Inbox UI (Item 6.1): clean dark-card dialog for missed live & offline alerts."""
 from __future__ import annotations
 
 import tkinter as tk
@@ -17,12 +17,9 @@ from ui.common import (
     DIM,
     FG,
     FONT,
-    FONT_B,
     GREEN,
-    GREY,
     MUTED,
     PRIO_COLORS,
-    RED,
     button,
     label,
 )
@@ -54,7 +51,7 @@ def _fmt_trigger_time(iso_raw: str) -> str:
 
 
 class AlertInboxDialog(tk.Toplevel):
-    """Scrollable dark-themed Inbox showing unacknowledged live & offline-catchup alerts."""
+    """Compact, scrollable dark-themed Inbox showing unacknowledged live & offline alerts."""
 
     def __init__(
         self,
@@ -68,18 +65,19 @@ class AlertInboxDialog(tk.Toplevel):
         self.ctrl = ctrl
         self._on_edit_rule = on_edit_rule
         self._on_change = on_change
-        self._source_filter = "all"
-        self._sym_var = tk.StringVar(value="ALL")
-        self._filter_btns: dict[str, tk.Button] = {}
         self.cards: list[dict] = []
 
         self.title("Alerts Inbox — Unacknowledged")
         self.configure(bg=BG)
+        try:
+            self.attributes("-topmost", True)
+        except tk.TclError:
+            pass
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _e: self._close())
 
         top = tk.Frame(self, bg=BG)
-        top.pack(fill="x", padx=12, pady=(12, 6))
+        top.pack(fill="x", padx=12, pady=(12, 8))
         label(top, "🔔 Alerts Inbox", fg=FG, bold=True, bg=BG).pack(side="left")
         self.lbl_summary = label(top, "", fg=MUTED, bg=BG)
         self.lbl_summary.pack(side="left", padx=(10, 0))
@@ -87,79 +85,55 @@ class AlertInboxDialog(tk.Toplevel):
         self.btn_ack_all = button(top, "✓ Acknowledge All", self._ack_all, bg="#166534")
         self.btn_ack_all.pack(side="right", padx=(0, 8))
 
-        bar = tk.Frame(self, bg=BG2, highlightbackground="#383838", highlightthickness=1)
-        bar.pack(fill="x", padx=12, pady=(0, 8))
-        bar_inner = tk.Frame(bar, bg=BG2)
-        bar_inner.pack(fill="x", padx=8, pady=6)
-        for key, title in (("all", "All"), ("offline", "While Offline"), ("live", "Live")):
-            b = tk.Button(
-                bar_inner,
-                text=title,
-                command=lambda k=key: self._set_source(k),
-                bg=ACCENT if key == "all" else BTN,
-                fg=FG,
-                activebackground="#4B4B4B",
-                activeforeground=FG,
-                relief="flat",
-                bd=0,
-                padx=10,
-                pady=3,
-                font=FONT,
-                cursor="hand2",
-            )
-            b.pack(side="left", padx=(0, 6))
-            self._filter_btns[key] = b
-
-        label(bar_inner, "Ticker:", fg=MUTED, bg=BG2).pack(side="right", padx=(8, 4))
-        self.sym_menu = tk.OptionMenu(bar_inner, self._sym_var, "ALL", command=lambda _v: self.refresh())
-        self.sym_menu.config(
-            bg=BTN,
-            fg=FG,
-            activebackground="#4B4B4B",
-            activeforeground=FG,
-            relief="flat",
-            bd=0,
-            highlightthickness=0,
-            font=FONT,
-            width=8,
-        )
-        self.sym_menu["menu"].config(bg=BG2, fg=FG, font=FONT)
-        self.sym_menu.pack(side="right")
-
-        wrap = tk.Frame(self, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0, bd=0, width=640, height=400)
-        self.sb = tk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        self.wrap = tk.Frame(self, bg=BG)
+        self.wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.canvas = tk.Canvas(self.wrap, bg=BG, highlightthickness=0, bd=0, width=540, height=300)
+        self.sb = tk.Scrollbar(self.wrap, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.sb.set)
         self.inner = tk.Frame(self.canvas, bg=BG)
         self._win_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.sb.pack(side="right", fill="y")
-        self.inner.bind(
-            "<Configure>",
-            lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
-        )
-        self.canvas.bind(
-            "<Configure>",
-            lambda e: self.canvas.itemconfigure(self._win_id, width=max(320, e.width)),
-        )
+
+        self.inner.bind("<Configure>", lambda _e: self._sync_scrollregion())
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.bind("<MouseWheel>", self._on_wheel)
 
         self.refresh()
         place_near_widget(self, place_anchor or parent)
 
-    def _on_wheel(self, e) -> None:
-        if not e.delta:
+    def _on_canvas_configure(self, e) -> None:
+        self.canvas.itemconfigure(self._win_id, width=max(320, e.width))
+        self._sync_scrollregion()
+
+    def _sync_scrollregion(self) -> None:
+        if not self.winfo_exists():
             return
-        steps = int(-e.delta / 120) or (-1 if e.delta > 0 else 1)
         try:
-            self.canvas.yview_scroll(steps, "units")
+            self.inner.update_idletasks()
+            cw = max(320, self.canvas.winfo_width() or 540)
+            ch = max(1, self.canvas.winfo_height() or 300)
+            req_h = max(0, self.inner.winfo_reqheight())
+            self.canvas.configure(scrollregion=(0, 0, cw, max(req_h, ch)))
+            if req_h <= ch:
+                if self.sb.winfo_manager():
+                    self.sb.pack_forget()
+                self.canvas.yview_moveto(0)
+            else:
+                if not self.sb.winfo_manager():
+                    self.sb.pack(side="right", fill="y")
         except tk.TclError:
             pass
 
-    def _set_source(self, key: str) -> None:
-        self._source_filter = key
-        self.refresh()
+    def _on_wheel(self, e) -> None:
+        if not e.delta:
+            return
+        try:
+            if self.inner.winfo_reqheight() <= max(1, self.canvas.winfo_height()):
+                return
+            steps = int(-e.delta / 120) or (-1 if e.delta > 0 else 1)
+            self.canvas.yview_scroll(steps, "units")
+        except tk.TclError:
+            pass
 
     def _close(self) -> None:
         try:
@@ -180,8 +154,7 @@ class AlertInboxDialog(tk.Toplevel):
             self._notify_parent()
 
     def _ack_all(self) -> None:
-        sym = None if self._sym_var.get() == "ALL" else self._sym_var.get()
-        if self.ctrl.acknowledge_all_alerts(self._source_filter, sym):
+        if self.ctrl.acknowledge_all_alerts("all"):
             self.refresh()
             self._notify_parent()
 
@@ -194,78 +167,49 @@ class AlertInboxDialog(tk.Toplevel):
         if callable(self._on_edit_rule):
             self._on_edit_rule(symbol, alert_id)
 
-    def _sync_symbol_choices(self, all_records: list[dict]) -> None:
-        syms = ["ALL"] + sorted({r.get("symbol", "") for r in all_records if r.get("symbol")})
-        cur = self._sym_var.get()
-        if cur not in syms:
-            self._sym_var.set("ALL")
-        m = self.sym_menu["menu"]
-        m.delete(0, "end")
-        for s in syms:
-            m.add_command(
-                label=s,
-                command=lambda val=s: (self._sym_var.set(val), self.refresh()),
-            )
-
     def refresh(self) -> None:
         if not self.winfo_exists():
             return
-        summary = self.ctrl.unacked_summary()
-        total = int(summary.get("total", 0))
-        off_n = int(summary.get("offline", 0))
-        live_n = int(summary.get("live", 0))
+        records = self.ctrl.unacked_alerts("all")
+        total = len(records)
 
         self.lbl_summary.config(
-            text=(
-                f"{total} unacknowledged ({off_n} offline, {live_n} live)"
-                if total > 0
-                else "All caught up"
-            ),
+            text=f"{total} unacknowledged" if total > 0 else "All caught up",
             fg=AMBER if total > 0 else GREEN,
         )
-        labels = {
-            "all": f"All ({total})",
-            "offline": f"While Offline ({off_n})",
-            "live": f"Live ({live_n})",
-        }
-        for key, btn in self._filter_btns.items():
-            btn.config(
-                text=labels[key],
-                bg=ACCENT if self._source_filter == key else BTN,
-            )
-
-        all_recs = self.ctrl.unacked_alerts("all")
-        self._sync_symbol_choices(all_recs)
-        sym = None if self._sym_var.get() == "ALL" else self._sym_var.get()
-        visible = self.ctrl.unacked_alerts(self._source_filter, sym)
-        self.btn_ack_all.config(state="normal" if visible else "disabled")
+        if total > 0:
+            self.btn_ack_all.config(state="normal", bg="#166534", fg=FG)
+        else:
+            self.btn_ack_all.config(state="disabled", bg=BG2, fg=DIM)
 
         for child in list(self.inner.winfo_children()):
             child.destroy()
         self.cards.clear()
 
-        if not visible:
+        if not records:
             empty = tk.Frame(self.inner, bg=BG2, highlightbackground="#383838", highlightthickness=1)
-            empty.pack(fill="x", padx=4, pady=12)
+            empty.pack(fill="x", padx=2, pady=8)
             label(
                 empty,
-                "✓ No unacknowledged alerts match this filter.",
+                "✓ All caught up — no unacknowledged alerts.",
                 fg=GREEN,
                 bold=True,
                 bg=BG2,
             ).pack(anchor="w", padx=14, pady=(12, 4))
             label(
                 empty,
-                "Missed live popups and alerts triggered while your laptop was closed or asleep will appear here.",
+                "Missed live pop-ups and offline laptop-closed alerts appear here.",
                 fg=MUTED,
                 bg=BG2,
-                wraplength=580,
+                wraplength=490,
                 justify="left",
             ).pack(anchor="w", padx=14, pady=(0, 12))
+            self._sync_scrollregion()
             return
 
-        for rec in visible:
+        for rec in records:
             self._build_card(rec)
+        self._sync_scrollregion()
 
     def _build_card(self, rec: dict) -> None:
         prio = rec.get("priority", "MEDIUM")
@@ -280,7 +224,7 @@ class AlertInboxDialog(tk.Toplevel):
             highlightbackground="#444444",
             highlightthickness=1,
         )
-        card.pack(fill="x", padx=4, pady=5)
+        card.pack(fill="x", padx=2, pady=4)
 
         head = tk.Frame(card, bg=BG2)
         head.pack(fill="x", padx=10, pady=(8, 4))
@@ -299,18 +243,16 @@ class AlertInboxDialog(tk.Toplevel):
         title = sym if not rec.get("name") else f"{sym} · {rec['name']}"
         label(head, title, fg=FG, bold=True, bg=BG2).pack(side="left", padx=(8, 6))
 
-        src_text = "While Offline" if is_off else "Live"
-        src_bg = "#1E3A8A" if is_off else "#14532D"
-        src_fg = "#93C5FD" if is_off else "#86EFAC"
-        tk.Label(
-            head,
-            text=f" {src_text} ",
-            bg=src_bg,
-            fg=src_fg,
-            font=("Segoe UI", 8, "bold"),
-            padx=4,
-            pady=1,
-        ).pack(side="left")
+        if is_off:
+            tk.Label(
+                head,
+                text=" Offline ",
+                bg="#1E3A8A",
+                fg="#93C5FD",
+                font=("Segoe UI", 8, "bold"),
+                padx=4,
+                pady=1,
+            ).pack(side="left")
 
         sess = f" · {rec['session']}" if rec.get("session") else ""
         t_lbl = _fmt_trigger_time(rec.get("trigger_time", "")) + sess
@@ -318,22 +260,23 @@ class AlertInboxDialog(tk.Toplevel):
 
         cond = rec.get("condition") or rec.get("operator") or ""
         status_txt = rec.get("alert_status", "")
-        cond_line = f"{cond}   [{status_txt}]" if status_txt else cond
-        label(card, cond_line, fg=FG, bg=BG2, wraplength=610, justify="left").pack(
-            fill="x", padx=10, pady=(0, 3)
+        cond_line = f"{cond}   [{status_txt}]" if status_txt and status_txt != "Active" else cond
+        label(card, cond_line, fg=FG, bg=BG2, wraplength=500, justify="left").pack(
+            fill="x", padx=10, pady=(0, 6)
         )
+
+        foot = tk.Frame(card, bg=BG2)
+        foot.pack(fill="x", padx=10, pady=(0, 8))
 
         trig_p = _fmt_price(rec.get("trigger_price"))
         peak_p = _fmt_price(rec.get("peak_price"))
         live_p = rec.get("live_price_text", "—")
-        parts = [f"Triggered: {trig_p}"]
-        if is_off and peak_p != "—":
-            parts.append(f"Offline Peak: {peak_p}")
-        parts.append(f"Now: {live_p}")
-        label(card, "   |   ".join(parts), fg=MUTED, bg=BG2).pack(fill="x", padx=10, pady=(0, 6))
+        parts = [f"Triggered {trig_p}"]
+        if is_off and peak_p != "—" and peak_p != trig_p:
+            parts.append(f"Peak {peak_p}")
+        parts.append(f"Now {live_p}")
+        label(foot, " · ".join(parts), fg=MUTED, bg=BG2).pack(side="left")
 
-        foot = tk.Frame(card, bg=BG2)
-        foot.pack(fill="x", padx=10, pady=(0, 8))
         btns: dict[str, tk.Button] = {}
         b_ack = button(foot, "✓ Ack", lambda e=eid: self._ack_one(e), bg=BTN)
         b_ack.pack(side="right")

@@ -284,8 +284,8 @@ class MiniTrackerWindow(tk.Toplevel):
         self.close_btn = self._icon("✕", self._close)
         self.gear_btn = self._icon("⚙", self.open_settings)
 
-        self.inbox_btn = tk.Label(self.header, text="🔔", font=FONT_ICON, bg=BG2, fg=MUTED,
-                                  cursor="hand2", padx=6)
+        self.inbox_btn = tk.Label(self.header, text="🔔", font=("Segoe UI", 9), bg=BG2, fg=MUTED,
+                                  cursor="hand2", padx=4)
         self.inbox_btn.pack(side="left", fill="y")
         _bind_icon_button(self.inbox_btn, self._open_inbox)
 

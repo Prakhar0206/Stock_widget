@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import queue
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -46,6 +47,24 @@ def resolve_data_dir(args, environ=os.environ) -> Path:
         root = Path(base) if base else Path.home()
         return data_dir(root / ("StockAlertWidget_demo" if base else ".StockAlertWidget_demo"))
     return data_dir()
+
+
+def relaunch_self(argv=None, executable: Optional[str] = None) -> subprocess.Popen:
+    """Spawn a detached replacement process using sys.executable and CLI args."""
+    exe = executable or sys.executable
+    args = list(sys.argv[1:] if argv is None else argv)
+    script = str(Path(__file__).resolve())
+    flags = 0
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+        )
+    return subprocess.Popen(
+        [exe, script, *args],
+        cwd=str(Path(__file__).resolve().parent),
+        creationflags=flags,
+        close_fds=True,
+    )
 
 
 @dataclass
@@ -200,7 +219,7 @@ def run(argv=None) -> None:
     if raw_mutex is None:
         return                                  # a second copy exits silently
     res = {"mutex": MutexGuard(raw_mutex), "sched": None, "layer": None, "ctrl": None, "root": None,
-           "provider": None, "done": False}
+           "provider": None, "done": False, "restart": False}
 
     def step(label, fn):                        # one failing teardown step must not skip the rest
         try:
@@ -258,7 +277,11 @@ def run(argv=None) -> None:
         def quit_app():
             shutdown()
 
-        view = WidgetView(root, ctrl, layer, cfg.look, request_quit=quit_app)
+        def restart_app():
+            res["restart"] = True
+            shutdown()
+
+        view = WidgetView(root, ctrl, layer, cfg.look, request_quit=quit_app, request_restart=restart_app)
         holder["view"] = view
 
         def _on_notifier_change():
@@ -358,6 +381,11 @@ def run(argv=None) -> None:
         root.mainloop()
     finally:
         shutdown()                              # also runs after a crash or an early exit
+        if res.get("restart"):
+            try:
+                relaunch_self()
+            except Exception as exc:
+                log.warning("widget relaunch failed: %s", type(exc).__name__)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,11 @@ class EditPanel(tk.Frame):
         self.btn_alerts = button(top, "Alerts", view.open_alert_inbox)
         self.btn_alerts.pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
+        self.btn_restart = button(top, "↻", view.request_restart)
+        self.btn_restart.config(padx=7)
+        self.btn_restart.pack(side="right", padx=(6, 0))
+        self.btn_restart.bind("<Enter>", lambda _e: self.lbl_head.config(text="Restart widget"))
+        self.btn_restart.bind("<Leave>", lambda _e: self.refresh())
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
         self.lbl_head.pack(fill="x", padx=12)
@@ -266,8 +271,9 @@ class EditPanel(tk.Frame):
 
 class WidgetView:
     def __init__(self, root: tk.Tk, ctrl, layer, look: dict, now_fn: Callable = utcnow,
-                 request_quit: Callable = lambda: None):
+                 request_quit: Callable = lambda: None, request_restart: Callable | None = None):
         self.root, self.ctrl, self.layer, self.now_fn, self.request_quit = root, ctrl, layer, now_fn, request_quit
+        self.request_restart = request_restart or (lambda: None)
         self.look = merged_look(look)
         lk = self.look
         self.transparent = lk["background_mode"] == "transparent"
@@ -851,6 +857,13 @@ class WidgetView:
         )
 
     def open_alert_editor(self, symbol: str, _alert_id: str = "") -> None:
+        if self.inbox_dlg is not None:
+            try:
+                if self.inbox_dlg.winfo_exists():
+                    self.inbox_dlg.destroy()
+            except tk.TclError:
+                pass
+            self.inbox_dlg = None
         self.open_stock_editor(symbol)
 
     def _draw_inbox_badge(self, x2: int, cy: int, w: int, count: int) -> None:

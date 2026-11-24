@@ -151,6 +151,8 @@ class AppController:
         self._inbox_listeners: list[Callable] = []
         self._catchup_in_flight: bool = False
         self._last_catchup_at: Optional[datetime] = None
+        self._pending_catchup_since: Optional[datetime] = None
+        self._syncing_ack: bool = False
         if not isinstance(self.engine.state.get("unacked_alerts"), list):
             self.engine.state["unacked_alerts"] = []
         self._startup_last_active_at: Optional[datetime] = _parse_iso_utc(
@@ -332,6 +334,10 @@ class AppController:
                 }
         if ticks:
             self._touch_active(now)
+            if self._pending_catchup_since is not None and not self._catchup_in_flight:
+                pending_since = self._pending_catchup_since
+                self._pending_catchup_since = None
+                self.start_offline_catchup(now, since=pending_since)
         self.dispatch(events)
         self._save_state()
         self._notify_quote_listeners()
@@ -484,12 +490,22 @@ class AppController:
         items = self.engine.state.get("unacked_alerts")
         if not isinstance(items, list):
             return False
-        kept = [r for r in items if not (isinstance(r, dict) and r.get("event_id") == event_id)]
-        if len(kept) == len(items):
+        removed_live: set[str] = set()
+        kept = []
+        removed = False
+        for r in items:
+            if isinstance(r, dict) and r.get("event_id") == event_id:
+                removed = True
+                if not r.get("offline"):
+                    removed_live.add(event_id)
+            else:
+                kept.append(r)
+        if not removed:
             return False
         self.engine.state["unacked_alerts"] = kept
         self._save_state()
         self._notify_inbox_listeners()
+        self._sync_notifier_after_inbox_ack(removed_live)
         return True
 
     def acknowledge_all_alerts(self, source_filter: str = "all", symbol: Optional[str] = None) -> int:
@@ -499,6 +515,7 @@ class AppController:
         sym_u = symbol.strip().upper() if symbol else None
         kept = []
         removed = 0
+        removed_live: set[str] = set()
         for r in items:
             if not isinstance(r, dict):
                 continue
@@ -511,16 +528,47 @@ class AppController:
             match_sym = (not sym_u) or (r.get("symbol") == sym_u)
             if match_src and match_sym:
                 removed += 1
+                if not is_off and r.get("event_id"):
+                    removed_live.add(r["event_id"])
             else:
                 kept.append(r)
         if removed:
             self.engine.state["unacked_alerts"] = kept
             self._save_state()
             self._notify_inbox_listeners()
+            self._sync_notifier_after_inbox_ack(removed_live)
         return removed
 
+    def _sync_notifier_after_inbox_ack(self, removed_live_ids: set[str]) -> None:
+        if self._syncing_ack or not removed_live_ids:
+            return
+        latest = getattr(self.notifier, "_latest", None)
+        pending = getattr(self.notifier, "_pending_high", None)
+        batch_live: set[str] = set()
+        if isinstance(latest, dict) and not latest.get("acked"):
+            batch_live.update(latest.get("live_event_ids") or ())
+        if isinstance(pending, dict) and not pending.get("acked"):
+            batch_live.update(pending.get("live_event_ids") or ())
+        if not batch_live or not (batch_live & removed_live_ids):
+            return
+        remaining_live = {
+            r.get("event_id")
+            for r in (self.engine.state.get("unacked_alerts") or [])
+            if isinstance(r, dict) and not r.get("offline") and r.get("event_id")
+        }
+        if batch_live & remaining_live:
+            return
+        ack_fn = getattr(self.notifier, "acknowledge_latest", None)
+        if not callable(ack_fn):
+            return
+        self._syncing_ack = True
+        try:
+            ack_fn()
+        finally:
+            self._syncing_ack = False
+
     def acknowledge_live_events(self, event_ids: list[str]) -> int:
-        if not event_ids:
+        if self._syncing_ack or not event_ids:
             return 0
         id_set = set(event_ids)
         items = self.engine.state.get("unacked_alerts")
@@ -594,10 +642,11 @@ class AppController:
                                           "finnhub", condition="Feed offline: price data is stale",
                                           note="Feed offline: price data is stale")])
         now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
-        if self._last_active_saved_at is None or (now_utc - self._last_active_saved_at).total_seconds() >= 60:
-            self._touch_active(now_utc)
-            self._save_state()
-            self._last_active_saved_at = now_utc
+        if not self._catchup_in_flight and self._pending_catchup_since is None:
+            if self._last_active_saved_at is None or (now_utc - self._last_active_saved_at).total_seconds() >= 60:
+                self._touch_active(now_utc)
+                self._save_state()
+                self._last_active_saved_at = now_utc
 
     def mark_shutdown(self, now: Optional[datetime] = None) -> None:
         t_now = now or self.now_fn()
@@ -657,9 +706,10 @@ class AppController:
             self._last_catchup_at = now_utc
             if exc is not None:
                 log.warning("offline catch-up failed: %s", exc)
-                self._touch_active(now_utc)
-                self._save_state()
+                if self._pending_catchup_since is None or since < self._pending_catchup_since:
+                    self._pending_catchup_since = since
                 return
+            self._pending_catchup_since = None
             if bars_by_sym:
                 self._apply_offline_catchup(bars_by_sym, now_utc)
             self._touch_active(now_utc)

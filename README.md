@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-279%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-282%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -47,9 +47,9 @@ An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert en
 ### 📥 Unacknowledged Alerts Inbox & Offline Catch-Up
 * **Pure Unacknowledged Inbox**: Collects only missed alerts awaiting your attention—live alerts whose 10s pop-ups timed out while you were away plus alerts triggered while your laptop was closed or the widget was off (no "All History" UI clutter; `alerts_log.jsonl` remains on disk).
 * **Async Background Offline Catch-Up**: On startup and laptop wake (`on_wake`), asynchronously fetches missed 1-minute Yahoo Finance OHLC candles across `PH`, `RH`, and `AH` (up to 5 trading days since `last_active_at`) on a background worker thread so the UI never freezes.
-* **Single Summary Notification**: Offline catch-up lights up the `🔔 N` badge and fires one single summary pop-up/toast/chime (`offline_summary`). Dismissing that summary pop-up (`Alt + A` / **Acknowledge**) never clears individual unread offline cards in the inbox.
-* **Offline Peak vs Live Price & 1-Click Re-Arm**: Deduplicates repeated hits during an offline gap to one card per rule showing first trigger time/price, extreme **Offline Peak**, and live **Now** price comparison. Any `Once only` alert hit while offline transitions to `DONE` and offers a 1-click **`↻ Re-arm`** button right on the inbox card.
-* **Instant Access Everywhere**: Open the scrollable dark-card Alerts Inbox from the Main Widget header **`🔔 N`** badge, the **`Alerts (N)`** button in Edit Mode, or the Mini Tracker's left **`🔔 N`** header button / right-click.
+* **Single Summary Notification**: Offline catch-up lights up the `🔔 N` badge and fires one single summary pop-up/toast/chime (`offline_summary`). Dismissing that summary pop-up (`Alt + A` / **Acknowledge**) never clears individual unread offline cards in the inbox, and failed wake fetches automatically retry once live quotes reconnect.
+* **Offline Peak vs Live Price & 1-Click Re-Arm**: Deduplicates repeated hits during an offline gap to one card per rule showing first trigger time/price, extreme **Peak** (when moved past trigger), and live **Now** price comparison. Any `Once only` alert hit while offline transitions to `DONE` and offers a 1-click **`↻ Re-arm`** button right on the inbox card.
+* **Clean Single-Bar UI & Quick Controls**: Top bar with unacknowledged counter, **`✓ Acknowledge All`**, and **`Close`** (auto-hides scrollbar when short), plus **`↻` Restart** and **`Alerts (N)`** buttons in Edit Mode, Main Widget **`🔔 N`** header badge, and Mini Tracker **`🔔 N`** header button / right-click.
 
 ### 🪟 Floating Mini Tracker HUD (Always-on-Top)
 * **Translucent Dark Panel**: Compact, always-on-top floating companion matching the main widget palette (`#202020`/`#2D2D2D` dark cards with `#444444` outlines and 92% opacity), freely draggable with saved monitor-clamped coordinates.
@@ -174,7 +174,7 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 | `run_stock_alert_widget.bat` | Starts the widget in the background via `pythonw.exe` (no console window). |
 | `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with scripted price swings across a safe isolated folder. |
 | `run_stock_alert_widget.bat debug` | Starts in foreground console mode to display live logs and tracebacks. |
-| `run_stock_alert_widget.bat test` | Runs the full 279-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
+| `run_stock_alert_widget.bat test` | Runs the full 282-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
 | `run_stock_alert_widget.bat startup status` | Checks if the Windows Startup shortcut is configured. |
 | `run_stock_alert_widget.bat startup create` | Configures the widget to automatically launch on Windows login. |
 | `run_stock_alert_widget.bat startup remove` | Removes the Windows Startup shortcut. |
@@ -211,7 +211,7 @@ stock_alert_widget/
 └── ui/
     ├── widget.py            # Dark-card Canvas HUD, PH/RH/AH columns, sonar pulse, Inbox & Mini switches, EditPanel
     ├── mini_tracker.py      # Floating always-on-top companion HUD, Inbox button, overflow indicators, Filter dialog
-    ├── inbox.py             # Unacknowledged Alerts Inbox dialog (offline & live filters, Peak vs Now, Re-arm)
+    ├── inbox.py             # Clean unacknowledged Alerts Inbox dialog (Peak vs Now, Re-arm, live ack sync)
     ├── editor.py            # Edit mode StockEditor, TradingView AlertDialog, AddStock & API Keys modals
     ├── popup.py             # Centered dark-card desktop alert overlay pop-up
     └── common.py            # Shared dark palette, Tkinter timers & reusable form widgets
@@ -247,19 +247,19 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 279 items
+collected 282 items
 
-tests/test_alert_inbox_and_catchup.py .......                            [  2%]
-tests/test_app_core.py ................                                  [  8%]
+tests/test_alert_inbox_and_catchup.py ..........                         [  3%]
+tests/test_app_core.py ................                                  [  9%]
 tests/test_audit_and_extended_hours.py ................................. [ 20%]
-tests/test_config_multikey.py ..................                         [ 26%]
+tests/test_config_multikey.py ..................                         [ 27%]
 tests/test_config_store.py .....................                         [ 34%]
-tests/test_data_checks.py .......                                        [ 36%]
+tests/test_data_checks.py .......                                        [ 37%]
 tests/test_desktop_layer_stub.py ..........                              [ 40%]
 tests/test_engine.py ...........                                         [ 44%]
 tests/test_finnhub_pool.py ............................                  [ 54%]
-tests/test_finnhub_scheduler.py ...................                      [ 60%]
-tests/test_main_demo.py ........                                         [ 63%]
+tests/test_finnhub_scheduler.py ...................                      [ 61%]
+tests/test_main_demo.py ........                                         [ 64%]
 tests/test_main_multikey.py .........                                    [ 67%]
 tests/test_market_clock.py ......                                        [ 69%]
 tests/test_market_clock_rules.py .......                                 [ 71%]
@@ -272,7 +272,7 @@ tests/test_replay_soak.py ..                                             [ 92%]
 tests/test_startup_shortcut.py ..                                        [ 93%]
 tests/test_ui_smoke.py ...................                               [100%]
 
-============================ 279 passed =======================================
+============================ 282 passed =======================================
 ```
 
 ---

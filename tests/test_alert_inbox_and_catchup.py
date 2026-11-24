@@ -149,6 +149,11 @@ def test_yahoo_fetch_intraday_bars_parses_ohlc_filters_window_and_never_sends_fi
     for _url, _params, hdrs in fake_yahoo.calls:
         assert "X-Finnhub-Token" not in hdrs
 
+    # All-fail transport raises NetworkFailure so controller preserves catch-up window
+    from providers.base import NetworkFailure
+    with pytest.raises(NetworkFailure):
+        prov.fetch_intraday_bars(["FAIL"], T0 - timedelta(minutes=5), T0)
+
 
 # --------------------------------------------------------------------------- Engine offline bars
 def test_engine_offline_bars_catches_intrabar_high_and_deduplicates_with_peak_price():
@@ -200,6 +205,27 @@ def test_engine_offline_bars_respects_session_scope_and_downside_peak():
     assert evs[0].peak_price == Dc("141.30")
     assert eng.alert_state("NVDA", "r1")["state"] == "ARMED"
     assert eng.alert_state("NVDA", "r2")["state"] == "DONE"
+
+
+def test_engine_offline_peak_respects_session_scope():
+    cfg = Config()
+    cal = MarketCalendar()
+    from engine import AlertEngine
+
+    # Regular-only alert triggers during RH at 151, must NOT update peak from later AH spike (158)
+    a_reg = Alert(id="reg_pk", operator="crossing_up", condition_mode="price", value=Dc("150"),
+                  trigger="once", priority="HIGH", session_scope="regular")
+    stock = _make_stock(alerts=[a_reg])
+    eng = AlertEngine(cfg)
+    eng.sym_state("NVDA")["last_price"] = "148.00"
+    t_ah = datetime(2026, 10, 14, 21, 0, tzinfo=timezone.utc)   # 17:00 ET (AH)
+    bars = [
+        _bar(T0, 149, 152.00, 148.50, 151.00),                   # RH: peak 152.00
+        _bar(t_ah, 151, 158.00, 150.50, 157.00),                 # AH: outside regular scope
+    ]
+    evs = eng.evaluate_offline_bars(stock, bars, cal, t_ah + timedelta(minutes=1))
+    assert len(evs) == 1
+    assert evs[0].peak_price == Dc("152.00")
 
 
 # --------------------------------------------------------------------------- Controller + Notifier
@@ -312,7 +338,26 @@ def test_async_offline_catchup_via_scheduler_option_a_and_2a_rearm_and_privacy(t
     assert ctrl2.unacked_summary() == {"total": 0, "offline": 0, "live": 0}
 
 
-def test_wake_triggers_async_catchup_and_handles_provider_failure(tmp_path):
+def test_inbox_ack_silences_active_notifier_alarm_and_pill(tmp_path):
+    st = Store(tmp_path)
+    cfg = Config()
+    a1 = Alert(id="h1", operator="greater_than", condition_mode="price", value=Dc("150"),
+               trigger="once", priority="HIGH")
+    st.save_watchlist(Watchlist(symbols=[_make_stock(alerts=[a1])]), cfg)
+
+    timers = FakeTimers()
+    notifier = Notifier(cfg, NullBackends(), timers, lambda: T0)
+    ctrl = AppController(cfg, st, MockProvider({"NVDA": [151]}), notifier, now_fn=lambda: T0)
+    ctrl.on_ticks([tick("151.00", "NVDA", T0, 148)], T0)
+    assert notifier._latest is not None and not notifier._latest["acked"]
+    rec = ctrl.unacked_alerts("live")[0]
+
+    assert ctrl.acknowledge_alert(rec["event_id"]) is True
+    assert notifier._latest["acked"] is True
+    assert ctrl.unacked_summary() == {"total": 0, "offline": 0, "live": 0}
+
+
+def test_wake_catchup_network_failure_preserves_pending_and_retries_on_next_tick(tmp_path):
     st = Store(tmp_path)
     cfg = Config()
     a1 = Alert(id="w1", operator="greater_than", condition_mode="price", value=Dc("150"),
@@ -322,7 +367,7 @@ def test_wake_triggers_async_catchup_and_handles_provider_failure(tmp_path):
     st.save_state({"version": 1, "symbols": {"NVDA": {"last_price": "148.00", "alerts": {}}},
                    "last_active_at": last_seen, "unacked_alerts": []})
 
-    prov = BarMockProvider(bars={"NVDA": []}, fail=True)
+    prov = BarMockProvider(bars={"NVDA": [_bar(T0 - timedelta(minutes=3), 149, 154.0, 148.5, 149.2)]}, fail=True)
     timers = FakeTimers()
     notifier = Notifier(cfg, NullBackends(), timers, lambda: T0)
     polls = []
@@ -343,7 +388,41 @@ def test_wake_triggers_async_catchup_and_handles_provider_failure(tmp_path):
     assert not q_in.empty()
     ctrl.drain(q_in)
     assert ctrl._catchup_in_flight is False
+    # Failed wake fetch preserves _pending_catchup_since and does not overwrite last_active_at
+    assert ctrl._pending_catchup_since is not None
     assert ctrl.unacked_summary() == {"total": 0, "offline": 0, "live": 0}
+
+    # Next successful live tick automatically retries offline catch-up once network recovers
+    prov.fail = False
+    t_next = T0 + timedelta(seconds=15)
+    ctrl.on_ticks([tick("149.20", "NVDA", t_next, 148)], t_next)
+    for _ in range(40):
+        if not q_in.empty():
+            break
+        ev.wait(0.025)
+    assert not q_in.empty()
+    ctrl.drain(q_in)
+    assert ctrl._pending_catchup_since is None
+    assert ctrl.unacked_summary() == {"total": 1, "offline": 1, "live": 0}
+
+
+def test_main_relaunch_self_builds_detached_popen_cmd(monkeypatch):
+    import main as main_mod
+
+    captured = {}
+
+    def fake_popen(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["kw"] = kw
+        return "PROC"
+
+    monkeypatch.setattr(main_mod.subprocess, "Popen", fake_popen)
+    res = main_mod.relaunch_self(argv=["--mock"], executable="C:/py/pythonw.exe")
+    assert res == "PROC"
+    assert captured["cmd"][0] == "C:/py/pythonw.exe"
+    assert captured["cmd"][1].endswith("main.py")
+    assert captured["cmd"][2:] == ["--mock"]
+    assert captured["kw"]["close_fds"] is True
 
 
 # --------------------------------------------------------------------------- UI Integration
@@ -376,7 +455,8 @@ def test_ui_inbox_dialog_widget_badge_and_mini_tracker(tmp_path):
         ctrl.on_ticks([tick("146.50", "NVDA", T0, 147)], T0)
 
         layer = FakeLayer()
-        view = WidgetView(root, ctrl, layer, {}, now_fn=lambda: T0)
+        restarts = []
+        view = WidgetView(root, ctrl, layer, {}, now_fn=lambda: T0, request_restart=lambda: restarts.append(1))
         view.render()
 
         # Header badge drawn to the LEFT of Mini without breaking card_polys or gear > mini
@@ -390,11 +470,14 @@ def test_ui_inbox_dialog_widget_badge_and_mini_tracker(tmp_path):
         assert any("🔔 2" in c.itemcget(i, "text") for i in c.find_withtag("status_inbox_badge")
                    if c.type(i) == "text")
 
-        # Edit Mode Alerts (2) button appears before Quit / Exit edit mode
+        # Edit Mode Alerts (2) & Restart (↻) buttons appear before Quit / Exit edit mode
         view.enter_edit()
         assert "Alerts (2)" in view.panel.btn_alerts.cget("text")
         top_frame = view.panel.btn_alerts.master
         assert top_frame.winfo_children()[-1].cget("text") == "Exit edit mode"
+        assert view.panel.btn_restart.cget("text") == "↻"
+        view.panel.btn_restart.invoke()
+        assert restarts == [1]
         view.exit_edit()
 
         # Mini Tracker left inbox button shows 🔔 1 after live1 is acked while off1 persists
@@ -405,23 +488,45 @@ def test_ui_inbox_dialog_widget_badge_and_mini_tracker(tmp_path):
         assert view.mini is not None
         assert view.mini.inbox_btn.cget("text") == "🔔 1"
 
-        # Open AlertInboxDialog and test filter + 1-click Re-arm + Ack
+        # Open simplified AlertInboxDialog (topmost, no filter bar) + 1-click Re-arm + scroll lock
         view.open_alert_inbox()
-        root.update_idletasks()
+        root.update()
         dlg = view.inbox_dlg
         assert isinstance(dlg, AlertInboxDialog) and dlg.winfo_exists()
-
-        dlg._set_source("offline")
-        root.update_idletasks()
+        assert not hasattr(dlg, "_filter_btns")
         assert len(dlg.cards) == 1
+        assert dlg.yview if hasattr(dlg, "yview") else dlg.canvas.yview() == (0.0, 1.0)
+        assert not dlg.sb.winfo_manager()
+
+        # Wheel scroll while short/empty does not move banner/content
+        class _WheelEv:
+            delta = -120
+        dlg._on_wheel(_WheelEv())
+        assert dlg.canvas.yview() == (0.0, 1.0)
+
+        # Clicking Re-arm resets DONE -> ARMED/WAIT_CROSS cleanly
         assert "rearm" in dlg.cards[0]["buttons"]
         dlg.cards[0]["buttons"]["rearm"].invoke()
         root.update_idletasks()
         assert ctrl.engine.alert_state("NVDA", "off1")["state"] in ("ARMED", "WAIT_CROSS")
 
+        # Clicking Edit closes topmost Inbox and opens Edit Mode on stock
+        dlg.cards[0]["buttons"]["edit"].invoke()
+        root.update_idletasks()
+        assert view.inbox_dlg is None
+        assert view.editing and view.panel.open_symbol == "NVDA"
+        view.exit_edit()
+
+        # Reopen Inbox, Ack All clears cards and hides scrollbar cleanly
+        view.open_alert_inbox()
+        root.update()
+        dlg = view.inbox_dlg
         dlg._ack_all()
         root.update_idletasks()
         assert len(dlg.cards) == 0
+        assert not dlg.sb.winfo_manager()
+        assert dlg.canvas.yview() == (0.0, 1.0)
+        assert str(dlg.btn_ack_all.cget("state")) == "disabled"
 
         # Privacy hide closes Inbox cleanly
         view.set_hidden(True)

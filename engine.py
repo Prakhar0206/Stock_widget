@@ -348,6 +348,7 @@ class AlertEngine:
 
         dedup: dict[str, AlertEvent] = {}
         fallback_pc = _safe_dec(ss.get("prev_close"))
+        alert_by_id = {a.id: a for a in stock.alerts}
 
         for bar in bars:
             if (bar.close is None or bar.close <= 0
@@ -356,15 +357,15 @@ class AlertEngine:
                     or bar.open is None or bar.open <= 0):
                 continue
             bar_utc = bar.time.replace(tzinfo=timezone.utc) if bar.time.tzinfo is None else bar.time.astimezone(timezone.utc)
-            rt.history.append((bar_utc, bar.close))
-            cutoff = bar_utc - timedelta(hours=24)
-            while rt.history and rt.history[0][0] < cutoff:
-                rt.history.popleft()
-
             session = calendar.session_at(bar_utc)
             if session == Session.CLOSED:
                 rt.prev_price = bar.close
                 continue
+
+            rt.history.append((bar_utc, bar.close))
+            cutoff = bar_utc - timedelta(hours=24)
+            while rt.history and rt.history[0][0] < cutoff:
+                rt.history.popleft()
 
             if bar.close >= bar.open:
                 raw_probes = (bar.open, bar.low, bar.high, bar.close)
@@ -443,8 +444,12 @@ class AlertEngine:
 
             if prev_before_bar is None:
                 rt.prev_price = bar.close
-            for ev in dedup.values():
-                self._update_offline_peak(ev, bar)
+            for aid, ev in dedup.items():
+                alert_obj = alert_by_id.get(aid)
+                if alert_obj is not None and session_matches_scope(
+                    session, alert_obj.session_scope, self.cfg.extended_hours
+                ):
+                    self._update_offline_peak(ev, bar)
 
         return sort_by_priority(list(dedup.values()))
 

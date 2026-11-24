@@ -732,13 +732,23 @@ class FinnhubProvider(QuoteProvider):
             return {}
         rng = "1d" if (until - since).total_seconds() <= 20 * 3600 else "5d"
         out: dict[str, list[OHLCBar]] = {}
+        attempted = 0
+        errors = 0
         for raw_sym in symbols:
             sym = str(raw_sym).upper().strip()
             if not sym:
                 continue
-            bars = self._fetch_yahoo_1m_bars(sym, since, until, rng)
+            attempted += 1
+            try:
+                bars = self._fetch_yahoo_1m_bars(sym, since, until, rng)
+            except NetworkFailure as exc:
+                errors += 1
+                log.debug("yahoo 1m bars fetch failed for %s: %s", sym, exc)
+                continue
             if bars:
                 out[sym] = bars
+        if attempted > 0 and errors == attempted:
+            raise NetworkFailure("offline catch-up failed")
         return out
 
     def _fetch_yahoo_1m_bars(self, sym: str, since: datetime, until: datetime, rng: str) -> list[OHLCBar]:
@@ -746,8 +756,11 @@ class FinnhubProvider(QuoteProvider):
         params = {"interval": "1m", "range": rng, "includePrePost": "true"}
         try:
             r = self._yahoo_s.get(url, params=params, timeout=5.0)
-            if r.status_code != 200:
-                return []
+        except Exception as exc:
+            raise NetworkFailure(type(exc).__name__) from exc
+        if r.status_code != 200:
+            raise NetworkFailure(f"HTTP {r.status_code}")
+        try:
             data = json.loads(r.text, parse_float=Decimal)
             result = (data.get("chart") or {}).get("result") or []
             if not result:
@@ -755,7 +768,7 @@ class FinnhubProvider(QuoteProvider):
             r0 = result[0]
             meta = r0.get("meta") or {}
         except Exception as exc:
-            log.debug("yahoo 1m bars fetch failed for %s: %s", sym, type(exc).__name__)
+            log.debug("yahoo 1m bars parse failed for %s: %s", sym, type(exc).__name__)
             return []
 
         timestamps = r0.get("timestamp") or []
