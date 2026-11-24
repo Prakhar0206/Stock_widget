@@ -128,6 +128,7 @@ class Notifier:
         self._latest: Optional[dict] = None      # most recent unacked alert batch, for Alt+A & Mini pill
         self._pending_high: Optional[dict] = None
         self._listeners: list = []
+        self._ack_listeners: list = []
         self._beep_h = self._beep_stop_h = self._end_h = self._esc_h = None
 
     def add_listener(self, fn: Callable[[], None]) -> None:
@@ -140,12 +141,31 @@ class Notifier:
         except ValueError:
             pass
 
+    def add_ack_listener(self, fn: Callable[[list[str]], None]) -> None:
+        if fn not in self._ack_listeners:
+            self._ack_listeners.append(fn)
+
+    def remove_ack_listener(self, fn: Callable[[list[str]], None]) -> None:
+        try:
+            self._ack_listeners.remove(fn)
+        except ValueError:
+            pass
+
     def _notify_listeners(self) -> None:
         for fn in list(self._listeners):
             try:
                 fn()
             except Exception:
                 log.exception("notifier listener failed")
+
+    def _notify_ack_listeners(self, event_ids: list[str]) -> None:
+        if not event_ids:
+            return
+        for fn in list(self._ack_listeners):
+            try:
+                fn(event_ids)
+            except Exception:
+                log.exception("notifier ack listener failed")
 
     def toggle_mute(self) -> bool:
         self.muted = not self.muted
@@ -163,6 +183,15 @@ class Notifier:
         prev = self._latest
         unacked_prev = bool(prev and not prev.get("acked"))
         new_count = len(note.events)
+        live_ids = [
+            ev.event_id
+            for ev in note.events
+            if getattr(ev, "event_id", "")
+            and not getattr(ev, "offline", False)
+            and ev.kind not in ("feed_stale", "key_invalid", "offline_summary")
+        ]
+        prev_live_ids = list(prev.get("live_event_ids", [])) if unacked_prev and prev else []
+        merged_live_ids = list(dict.fromkeys(prev_live_ids + live_ids))
         if unacked_prev and prev.get("priority") == "HIGH" and eff_prio != "HIGH":
             total_count = prev.get("count", 1) + new_count
             self._latest = {
@@ -171,6 +200,7 @@ class Notifier:
                 "acked": False,
                 "count": total_count,
                 "spec": spec,
+                "live_event_ids": merged_live_ids,
             }
             if self._pending_high is None:
                 self._pending_high = prev
@@ -182,6 +212,7 @@ class Notifier:
                 "acked": False,
                 "count": total_count,
                 "spec": spec,
+                "live_event_ids": merged_live_ids,
             }
             if eff_prio == "HIGH":
                 if self._pending_high is not None and self._pending_high is not prev:
@@ -224,10 +255,14 @@ class Notifier:
         pending = self._pending_high
         if (not cur or cur.get("acked")) and (not pending or pending.get("acked")):
             return False
-        if cur:
+        acked_ids: list[str] = []
+        if cur and not cur.get("acked"):
             cur["acked"] = True
-        if pending:
+            acked_ids.extend(cur.get("live_event_ids", []))
+        if pending and not pending.get("acked"):
             pending["acked"] = True
+            acked_ids.extend(pending.get("live_event_ids", []))
+        acked_ids = list(dict.fromkeys(acked_ids))
         self._pending_high = None
         self._stop_sound()
         self.b.popup_close()
@@ -235,6 +270,7 @@ class Notifier:
             self.t.cancel(self._esc_h)
             self._esc_h = None
         self._notify_listeners()
+        self._notify_ack_listeners(acked_ids)
         return True
 
     def _beep_loop(self, kind: str) -> None:

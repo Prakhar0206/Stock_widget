@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Optional
 
 
@@ -31,3 +32,7 @@ class QuoteProvider(ABC):
     def fetch_market_status(self) -> Optional[dict]:
         """Optional: {"isOpen": bool, "holiday": str|None}. None means 'use the bundled calendar'."""
         return None
+
+    def fetch_intraday_bars(self, symbols: list, since: datetime, until: datetime) -> dict[str, list]:
+        """Optional: {symbol: [OHLCBar, ...]} in chronological order for offline catch-up."""
+        return {}

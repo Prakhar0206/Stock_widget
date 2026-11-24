@@ -10,6 +10,7 @@ from typing import Callable
 from ui.common import (ACCENT, AMBER, BG, BG2, BTN, DIM, FG, GREEN, GREY,
                        MUTED, RED, TRANSPARENT_KEY, button, label)
 from ui.editor import AddStockDialog, AlertDialog, ApiKeysStatusDialog, ChoiceDialog, StockEditor
+from ui.inbox import AlertInboxDialog
 from ui.mini_tracker import MiniTrackerWindow, rounded_rect_points
 from market_clock import utcnow
 
@@ -31,7 +32,7 @@ TOGGLE_W, TOGGLE_H, TOGGLE_GAP = 32, 16, 12      # Mini Tracker switch (far righ
 TOGGLE_OFF = {"track": BG2, "outline": MUTED, "thumb": FG, "thumb_outline": ""}
 TOGGLE_ON = {"track": ACCENT, "outline": ACCENT, "thumb": "#FFFFFF", "thumb_outline": ""}
 IDLE_EDIT_S = 60
-_EDIT_DIALOG_TYPES = (AddStockDialog, AlertDialog, ApiKeysStatusDialog, ChoiceDialog)
+_EDIT_DIALOG_TYPES = (AddStockDialog, AlertDialog, ApiKeysStatusDialog, ChoiceDialog, AlertInboxDialog)
 
 
 def merged_look(cfg_look: dict) -> dict:
@@ -67,6 +68,8 @@ class EditPanel(tk.Frame):
         button(top, "Test Alert", self._test_alert).pack(side="left", padx=6)
         self.btn_hide = button(top, "Hide", view.toggle_hidden)
         self.btn_hide.pack(side="left", padx=6)
+        self.btn_alerts = button(top, "Alerts", view.open_alert_inbox)
+        self.btn_alerts.pack(side="left", padx=6)
         button(top, "Quit", view.request_quit, bg="#7F1D1D").pack(side="right")
         button(top, "Exit edit mode", view.exit_edit).pack(side="right", padx=6)
         self.lbl_head = label(self, "", fg=MUTED)
@@ -219,6 +222,11 @@ class EditPanel(tk.Frame):
         self.lbl_warn.config(text="\n".join(self.ctrl.all_warnings()))
         self.btn_mute.config(text="Unmute" if hv.muted else "Mute")
         self.btn_mini.config(bg=ACCENT if self.view.mini_open else BTN)
+        unacked_n = self.view._unacked_count()
+        self.btn_alerts.config(
+            text=f"Alerts ({unacked_n})" if unacked_n > 0 else "Alerts",
+            bg="#92400E" if unacked_n > 0 else BTN,
+        )
         flashing = self.view.flashing()
         for rv in self.ctrl.row_views(now):
             if rv.symbol not in self._rows:
@@ -301,12 +309,15 @@ class WidgetView:
         self._tip_win: tk.Toplevel | None = None
         self._tip_lbl: tk.Label | None = None
         self.mini: MiniTrackerWindow | None = None
+        self.inbox_dlg: AlertInboxDialog | None = None
         self.hidden: bool = False
         try:
             self.layer.on_peek_change = self._on_peek_change
         except Exception:
             pass
         self.ctrl.add_quote_listener(lambda: self.root.after(0, self._refresh_mini))
+        if callable(getattr(self.ctrl, "add_inbox_listener", None)):
+            self.ctrl.add_inbox_listener(lambda: self.root.after(0, self._on_inbox_changed))
         if callable(getattr(getattr(self.ctrl, "notifier", None), "add_listener", None)):
             self.ctrl.notifier.add_listener(lambda: self.root.after(0, self._refresh_mini))
         try:
@@ -658,11 +669,15 @@ class WidgetView:
             self._bind_tooltip(mtag, "Alerts muted")
             hx = c.bbox(m_item)[2] + 8
 
-        # 5. Mini Tracker switch + Settings gear: reserve room now, draw right-aligned once width is known
+        # 5. Inbox badge + Mini Tracker switch + Settings gear: reserve room now, draw right-aligned
+        unacked_n = self._unacked_count()
+        inbox_txt = f"🔔 {unacked_n}" if unacked_n > 0 else "🔔"
+        inbox_w = max(22, self.fs.measure(inbox_txt) + 12)
+        inbox_gap = 8
         mini_open = self.mini_open
         gear_w, gear_gap = 16, 5
         mini_w = self.fs.measure("Mini") + 6 + TOGGLE_W
-        hx_end = hx + TOGGLE_GAP + mini_w + 4 + gear_gap + gear_w
+        hx_end = hx + inbox_gap + inbox_w + TOGGLE_GAP + mini_w + 4 + gear_gap + gear_w
 
         y = hdr_y2 + 4
         strip_div_y = y
@@ -779,6 +794,8 @@ class WidgetView:
             c.coords(hdr_div, card_x1 + 2, hdr_div_y, card_x2 - 2, hdr_div_y)
         gear_x2 = card_x2 - inner_pad
         mini_x1 = gear_x2 - gear_w - gear_gap - mini_w - 4
+        inbox_x2 = mini_x1 - 8
+        self._draw_inbox_badge(inbox_x2, header_mid, inbox_w, unacked_n)
         self._draw_mini_toggle(mini_x1, header_mid, mini_open)
         self._draw_settings_gear(gear_x2, header_mid, gear_w)
         c.config(width=total_w, height=total_h)
@@ -788,7 +805,99 @@ class WidgetView:
             self._trigger_heartbeat_pulse()
         return total_w, total_h
 
-    # ---- Mini Tracker switch & Settings gear -----------------------------------------------------
+    # ---- Inbox badge, Mini Tracker switch & Settings gear ----------------------------------------
+    def _unacked_count(self) -> int:
+        fn = getattr(self.ctrl, "unacked_summary", None)
+        if callable(fn):
+            try:
+                return int((fn() or {}).get("total", 0))
+            except Exception:
+                return 0
+        return 0
+
+    def _on_inbox_changed(self) -> None:
+        if not self.hidden:
+            self.refresh()
+        if self.inbox_dlg is not None:
+            try:
+                if self.inbox_dlg.winfo_exists():
+                    self.inbox_dlg.refresh()
+                else:
+                    self.inbox_dlg = None
+            except tk.TclError:
+                self.inbox_dlg = None
+
+    def open_alert_inbox(self) -> None:
+        if self.hidden:
+            self.set_hidden(False)
+        self.hide_tooltip()
+        if self.inbox_dlg is not None:
+            try:
+                if self.inbox_dlg.winfo_exists():
+                    self.inbox_dlg.refresh()
+                    self.inbox_dlg.lift()
+                    self.inbox_dlg.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self.inbox_dlg = None
+        anchor = self.mini if (self.mini_open and self.mini.winfo_viewable()) else self.root
+        self.inbox_dlg = AlertInboxDialog(
+            self.root,
+            self.ctrl,
+            on_edit_rule=self.open_alert_editor,
+            on_change=self.refresh,
+            place_anchor=anchor,
+        )
+
+    def open_alert_editor(self, symbol: str, _alert_id: str = "") -> None:
+        self.open_stock_editor(symbol)
+
+    def _draw_inbox_badge(self, x2: int, cy: int, w: int, count: int) -> None:
+        c, tag = self.canvas, "status_inbox_badge"
+        bx1, bx2 = x2 - w, x2
+        by1, by2 = cy - 9, cy + 9
+        has_unread = count > 0
+        base_fill = "" if self.transparent else ("#452A06" if has_unread else BG2)
+        bg_poly = c.create_polygon(
+            rounded_rect_points(bx1, by1, bx2, by2, 4), smooth=True,
+            fill=base_fill, outline="", width=0,
+            tags=(tag, "inbox_badge_bg"),
+        )
+        txt = f"🔔 {count}" if has_unread else "🔔"
+        fg = AMBER if has_unread else MUTED
+        lbl = c.create_text(
+            (bx1 + bx2) // 2, cy, text=txt, fill=fg,
+            font=self.fs, anchor="center", tags=(tag, "inbox_badge_label"),
+        )
+        self._bind_tooltip(
+            tag,
+            f"Alerts Inbox: {count} unacknowledged" if has_unread else "Alerts Inbox (all caught up)",
+        )
+
+        def _on_enter(_e):
+            c.config(cursor="hand2")
+            c.itemconfig(lbl, fill="#FFFFFF")
+            if not self.transparent:
+                c.itemconfig(bg_poly, fill="#78350F" if has_unread else BTN)
+
+        def _on_leave(_e):
+            c.config(cursor="")
+            c.itemconfig(lbl, fill=fg)
+            if not self.transparent:
+                c.itemconfig(bg_poly, fill=base_fill)
+
+        def _on_release(e):
+            bbox = c.bbox(tag)
+            if bbox and bbox[0] <= e.x <= bbox[2] and bbox[1] <= e.y <= bbox[3]:
+                self.hide_tooltip()
+                self.open_alert_inbox()
+
+        c.tag_bind(tag, "<Enter>", _on_enter, add="+")
+        c.tag_bind(tag, "<Leave>", _on_leave, add="+")
+        c.tag_bind(tag, "<ButtonPress-1>", lambda _e: "break")
+        c.tag_bind(tag, "<ButtonRelease-1>", _on_release)
+
     @property
     def mini_open(self) -> bool:
         if self.mini is not None and not self.mini.winfo_exists():
@@ -983,6 +1092,13 @@ class WidgetView:
                 self._pulse_job = None
             self.hide_tooltip()
             self.hidden = True
+            if self.inbox_dlg is not None:
+                try:
+                    if self.inbox_dlg.winfo_exists():
+                        self.inbox_dlg.destroy()
+                except tk.TclError:
+                    pass
+                self.inbox_dlg = None
             if self.editing:
                 self.exit_edit(hide_after=True)
             if self.mini_open:
@@ -1026,6 +1142,8 @@ class WidgetView:
                 get_alert_tooltip=self._mini_alert_tooltip,
                 on_row_double_click=self.open_stock_editor,
                 hidden=self.hidden,
+                on_open_inbox=self.open_alert_inbox,
+                get_unacked_count=self._unacked_count,
             )
         self.refresh()
 

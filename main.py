@@ -221,7 +221,7 @@ def run(argv=None) -> None:
         if res["layer"] is not None:
             step("layer", res["layer"].quit)
         if res["ctrl"] is not None:
-            step("save state", res["ctrl"]._save_state)
+            step("save state", res["ctrl"].mark_shutdown)
         if res["root"] is not None:
             step("window", res["root"].destroy)
         step("mutex", res["mutex"].close)
@@ -265,7 +265,12 @@ def run(argv=None) -> None:
             if not res["done"]:
                 root.after(0, view._refresh_mini)
 
+        def _on_inbox_change():
+            if not res["done"]:
+                root.after(0, view.refresh)
+
         notifier.add_listener(_on_notifier_change)
+        ctrl.add_inbox_listener(_on_inbox_change)
         w, h = view.render()
         layer.attach(w, h, hook=cfg.hotkeys_enabled)
         if cfg.hotkeys_enabled:
@@ -287,6 +292,7 @@ def run(argv=None) -> None:
         view.start_clock()
         if rt.polling:
             sched.start()
+        ctrl.start_offline_catchup(utcnow())
 
         last_beat = [time.monotonic()]
 

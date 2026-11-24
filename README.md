@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-272%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-279%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -43,6 +43,13 @@ An ultra-responsive, privacy-focused desktop Heads-Up Display (HUD) and alert en
 * **`HIGH` (Persistent Alarm)**: Row highlight flash + Mini Tracker critical pill (`🚨`) + centered 10s dark-card Desktop Overlay Popup + persistent Windows Toast + 10s alarm sound + **auto-repeats every 2 minutes until acknowledged** (`Alt + A`, popup **Acknowledge** / `✕`, or clicking the Mini Tracker alert pill).
 * **`CUSTOM...`**: Open **`< Notifications`** to pick bespoke combinations of Desktop Popup, Windows Toast, Sound Tone (`none`, `chime`, `beep`, `bell`, `alarm`), Sound Duration (`Once`, `5s`, `10s`, `30s`), and Repeat-until-acknowledged.
 * **Centered Dark-Card Pop-Up & Diagnostics**: Styled priority card (`alert` strip, ticker/price hero row, condition summary, source/data age) centered on the active monitor work area without stealing focus, plus a **`Test Alert`** button in Edit Mode and optional **IST Quiet Hours**.
+
+### 📥 Unacknowledged Alerts Inbox & Offline Catch-Up
+* **Pure Unacknowledged Inbox**: Collects only missed alerts awaiting your attention—live alerts whose 10s pop-ups timed out while you were away plus alerts triggered while your laptop was closed or the widget was off (no "All History" UI clutter; `alerts_log.jsonl` remains on disk).
+* **Async Background Offline Catch-Up**: On startup and laptop wake (`on_wake`), asynchronously fetches missed 1-minute Yahoo Finance OHLC candles across `PH`, `RH`, and `AH` (up to 5 trading days since `last_active_at`) on a background worker thread so the UI never freezes.
+* **Single Summary Notification**: Offline catch-up lights up the `🔔 N` badge and fires one single summary pop-up/toast/chime (`offline_summary`). Dismissing that summary pop-up (`Alt + A` / **Acknowledge**) never clears individual unread offline cards in the inbox.
+* **Offline Peak vs Live Price & 1-Click Re-Arm**: Deduplicates repeated hits during an offline gap to one card per rule showing first trigger time/price, extreme **Offline Peak**, and live **Now** price comparison. Any `Once only` alert hit while offline transitions to `DONE` and offers a 1-click **`↻ Re-arm`** button right on the inbox card.
+* **Instant Access Everywhere**: Open the scrollable dark-card Alerts Inbox from the Main Widget header **`🔔 N`** badge, the **`Alerts (N)`** button in Edit Mode, or the Mini Tracker's left **`🔔 N`** header button / right-click.
 
 ### 🪟 Floating Mini Tracker HUD (Always-on-Top)
 * **Translucent Dark Panel**: Compact, always-on-top floating companion matching the main widget palette (`#202020`/`#2D2D2D` dark cards with `#444444` outlines and 92% opacity), freely draggable with saved monitor-clamped coordinates.
@@ -167,7 +174,7 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 | `run_stock_alert_widget.bat` | Starts the widget in the background via `pythonw.exe` (no console window). |
 | `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with scripted price swings across a safe isolated folder. |
 | `run_stock_alert_widget.bat debug` | Starts in foreground console mode to display live logs and tracebacks. |
-| `run_stock_alert_widget.bat test` | Runs the full 272-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
+| `run_stock_alert_widget.bat test` | Runs the full 279-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
 | `run_stock_alert_widget.bat startup status` | Checks if the Windows Startup shortcut is configured. |
 | `run_stock_alert_widget.bat startup create` | Configures the widget to automatically launch on Windows login. |
 | `run_stock_alert_widget.bat startup remove` | Removes the Windows Startup shortcut. |
@@ -202,8 +209,9 @@ stock_alert_widget/
 │   ├── startup_shortcut.py  # Windows Startup folder shortcut status/create/remove CLI
 │   └── make_sample_day.py   # Sample fixture generator for replay/soak verification
 └── ui/
-    ├── widget.py            # Dark-card Canvas HUD, PH/RH/AH columns, sonar pulse, Mini switch, EditPanel
-    ├── mini_tracker.py      # Floating always-on-top companion HUD, overflow indicators, Filter dialog
+    ├── widget.py            # Dark-card Canvas HUD, PH/RH/AH columns, sonar pulse, Inbox & Mini switches, EditPanel
+    ├── mini_tracker.py      # Floating always-on-top companion HUD, Inbox button, overflow indicators, Filter dialog
+    ├── inbox.py             # Unacknowledged Alerts Inbox dialog (offline & live filters, Peak vs Now, Re-arm)
     ├── editor.py            # Edit mode StockEditor, TradingView AlertDialog, AddStock & API Keys modals
     ├── popup.py             # Centered dark-card desktop alert overlay pop-up
     └── common.py            # Shared dark palette, Tkinter timers & reusable form widgets
@@ -220,7 +228,7 @@ All runtime and persistent user data is kept isolated in `%APPDATA%\StockAlertWi
 | `config.json` | General settings (`poll_seconds`, `extended_hours`, `default_priority`, `hotkeys_enabled`), `look` appearance tokens, optional `api_keys`, and `quiet_hours_ist`. |
 | `watchlist.json` | Current stock watchlist, optional manual trade details (`buy_price`, `shares`, `sell_price`, `fees`), and alert rules. |
 | `watchlist.last_good.json` | Automatic fallback copy preserved across atomic writes. |
-| `state.json` | Runtime state, `PH`/`RH`/`AH` session prices, alert arming/cooldown states, and Mini Tracker layout preferences. |
+| `state.json` | Runtime state, `PH`/`RH`/`AH` session prices, alert arming/cooldown states, `last_active_at`, `unacked_alerts`, and Mini Tracker layout preferences. |
 | `alerts_log.jsonl` | Append-only alert audit log (redacted: no shares, cost basis, or profits). |
 | `alerts_archive/` | Monthly archives (`alerts_log_YYYY-MM.jsonl`) created when logs older than 60 days are pruned on startup. |
 | `app.log` | Rotating operational log (1 MB $\times$ 3 files, strict key/PII redaction). |
@@ -239,31 +247,32 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 272 items
+collected 279 items
 
-tests/test_app_core.py ................                                   [  5%]
-tests/test_audit_and_extended_hours.py .................................  [ 18%]
-tests/test_config_multikey.py ..................                          [ 24%]
-tests/test_config_store.py .....................                          [ 32%]
-tests/test_data_checks.py .......                                         [ 34%]
-tests/test_desktop_layer_stub.py ..........                               [ 38%]
-tests/test_engine.py ...........                                          [ 42%]
-tests/test_finnhub_pool.py ............................                   [ 52%]
-tests/test_finnhub_scheduler.py ...................                       [ 59%]
-tests/test_main_demo.py ........                                          [ 62%]
-tests/test_main_multikey.py .........                                     [ 66%]
-tests/test_market_clock.py ......                                         [ 68%]
-tests/test_market_clock_rules.py .......                                  [ 70%]
-tests/test_mini_tracker.py .............................                  [ 81%]
-tests/test_notifier.py ...........                                        [ 85%]
-tests/test_pipeline.py .....                                              [ 87%]
-tests/test_positions.py .....                                             [ 89%]
-tests/test_privacy.py ......                                              [ 91%]
-tests/test_replay_soak.py ..                                              [ 92%]
-tests/test_startup_shortcut.py ..                                         [ 93%]
-tests/test_ui_smoke.py ...................                                [100%]
+tests/test_alert_inbox_and_catchup.py .......                            [  2%]
+tests/test_app_core.py ................                                  [  8%]
+tests/test_audit_and_extended_hours.py ................................. [ 20%]
+tests/test_config_multikey.py ..................                         [ 26%]
+tests/test_config_store.py .....................                         [ 34%]
+tests/test_data_checks.py .......                                        [ 36%]
+tests/test_desktop_layer_stub.py ..........                              [ 40%]
+tests/test_engine.py ...........                                         [ 44%]
+tests/test_finnhub_pool.py ............................                  [ 54%]
+tests/test_finnhub_scheduler.py ...................                      [ 60%]
+tests/test_main_demo.py ........                                         [ 63%]
+tests/test_main_multikey.py .........                                    [ 67%]
+tests/test_market_clock.py ......                                        [ 69%]
+tests/test_market_clock_rules.py .......                                 [ 71%]
+tests/test_mini_tracker.py .............................                 [ 82%]
+tests/test_notifier.py ...........                                       [ 86%]
+tests/test_pipeline.py .....                                             [ 87%]
+tests/test_positions.py .....                                            [ 89%]
+tests/test_privacy.py ......                                             [ 91%]
+tests/test_replay_soak.py ..                                             [ 92%]
+tests/test_startup_shortcut.py ..                                        [ 93%]
+tests/test_ui_smoke.py ...................                               [100%]
 
-============================ 272 passed =======================================
+============================ 279 passed =======================================
 ```
 
 ---

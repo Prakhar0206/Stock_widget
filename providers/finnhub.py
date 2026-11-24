@@ -32,7 +32,7 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from market_clock import ET
-from models import PriceTick
+from models import OHLCBar, PriceTick
 from providers.base import (MalformedResponse, NetworkFailure, ProviderError, QuoteProvider,
                             RateLimited)
 
@@ -718,6 +718,85 @@ class FinnhubProvider(QuoteProvider):
         if not isinstance(d, dict) or "isOpen" not in d:
             raise MalformedResponse("market status")
         return {"isOpen": bool(d["isOpen"]), "holiday": d.get("holiday"), "session": d.get("session")}
+
+    def fetch_intraday_bars(self, symbols: list, since: datetime, until: datetime) -> dict[str, list[OHLCBar]]:
+        """Fetch 1-minute pre/regular/after-hours OHLC bars from Yahoo v8 chart API
+        using the token-free `_yahoo_s` session for offline alert catch-up."""
+        if not self._uses_real_http or self._yahoo_s is None or not symbols:
+            return {}
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if until <= since:
+            return {}
+        rng = "1d" if (until - since).total_seconds() <= 20 * 3600 else "5d"
+        out: dict[str, list[OHLCBar]] = {}
+        for raw_sym in symbols:
+            sym = str(raw_sym).upper().strip()
+            if not sym:
+                continue
+            bars = self._fetch_yahoo_1m_bars(sym, since, until, rng)
+            if bars:
+                out[sym] = bars
+        return out
+
+    def _fetch_yahoo_1m_bars(self, sym: str, since: datetime, until: datetime, rng: str) -> list[OHLCBar]:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(sym, safe='')}"
+        params = {"interval": "1m", "range": rng, "includePrePost": "true"}
+        try:
+            r = self._yahoo_s.get(url, params=params, timeout=5.0)
+            if r.status_code != 200:
+                return []
+            data = json.loads(r.text, parse_float=Decimal)
+            result = (data.get("chart") or {}).get("result") or []
+            if not result:
+                return []
+            r0 = result[0]
+            meta = r0.get("meta") or {}
+        except Exception as exc:
+            log.debug("yahoo 1m bars fetch failed for %s: %s", sym, type(exc).__name__)
+            return []
+
+        timestamps = r0.get("timestamp") or []
+        quote_list = (r0.get("indicators") or {}).get("quote") or []
+        q0 = quote_list[0] if quote_list and isinstance(quote_list[0], dict) else {}
+        opens = q0.get("open") or []
+        highs = q0.get("high") or []
+        lows = q0.get("low") or []
+        closes = q0.get("close") or []
+        prev_close = _pos_dec(meta.get("chartPreviousClose")) or _pos_dec(meta.get("previousClose"))
+
+        by_ts: dict[datetime, OHLCBar] = {}
+        for idx, ts_raw in enumerate(timestamps):
+            ts_int = _int_ts(ts_raw)
+            if ts_int is None:
+                continue
+            try:
+                bar_dt = datetime.fromtimestamp(ts_int, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                continue
+            if bar_dt <= since or bar_dt > until:
+                continue
+            cl = _pos_dec(closes[idx]) if idx < len(closes) else None
+            if cl is None:
+                continue
+            op = (_pos_dec(opens[idx]) if idx < len(opens) else None) or cl
+            hi = (_pos_dec(highs[idx]) if idx < len(highs) else None) or cl
+            lo = (_pos_dec(lows[idx]) if idx < len(lows) else None) or cl
+            hi = max(hi, op, cl, lo)
+            lo = min(lo, op, cl, hi)
+            by_ts[bar_dt] = OHLCBar(
+                symbol=sym,
+                time=bar_dt,
+                open=op,
+                high=hi,
+                low=lo,
+                close=cl,
+                prev_close=prev_close,
+                source="yahoo_1m",
+            )
+        return [by_ts[k] for k in sorted(by_ts)]
 
     # ---- teardown --------------------------------------------------------------------------
     def close(self) -> None:

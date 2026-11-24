@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
+from uuid import uuid4
 
 from config import Config
 from data_checks import IGNORED, PAUSED, PriceFilter
@@ -24,6 +25,7 @@ from models import (
     Alert,
     AlertEvent,
     CustomNotification,
+    OHLCBar,
     PriceTick,
     StockConfig,
     resolve_notification_spec,
@@ -326,6 +328,140 @@ class AlertEngine:
         rt.prev_price = price
         return sort_by_priority(events)
 
+    def evaluate_offline_bars(
+        self,
+        stock: StockConfig,
+        bars: list[OHLCBar],
+        calendar: MarketCalendar,
+        now: datetime,
+    ) -> list[AlertEvent]:
+        """Replay chronological 1m OHLC bars missed while offline.
+        Evaluates intra-minute High/Low/Open/Close across enabled alerts, deduplicates
+        to at most one summary AlertEvent per alert rule, and tracks the offline peak price."""
+        if not bars or not stock.alerts:
+            return []
+        now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+        rt = self.runtime(stock.symbol)
+        ss = self.sym_state(stock.symbol)
+        if rt.prev_price is None:
+            rt.prev_price = _safe_dec(ss.get("last_price"))
+
+        dedup: dict[str, AlertEvent] = {}
+        fallback_pc = _safe_dec(ss.get("prev_close"))
+
+        for bar in bars:
+            if (bar.close is None or bar.close <= 0
+                    or bar.high is None or bar.high <= 0
+                    or bar.low is None or bar.low <= 0
+                    or bar.open is None or bar.open <= 0):
+                continue
+            bar_utc = bar.time.replace(tzinfo=timezone.utc) if bar.time.tzinfo is None else bar.time.astimezone(timezone.utc)
+            rt.history.append((bar_utc, bar.close))
+            cutoff = bar_utc - timedelta(hours=24)
+            while rt.history and rt.history[0][0] < cutoff:
+                rt.history.popleft()
+
+            session = calendar.session_at(bar_utc)
+            if session == Session.CLOSED:
+                rt.prev_price = bar.close
+                continue
+
+            if bar.close >= bar.open:
+                raw_probes = (bar.open, bar.low, bar.high, bar.close)
+            else:
+                raw_probes = (bar.open, bar.high, bar.low, bar.close)
+            probes: list[Decimal] = []
+            for p in raw_probes:
+                if not probes or probes[-1] != p:
+                    probes.append(p)
+
+            pc = bar.prev_close or fallback_pc
+            for a in stock.alerts:
+                st = self.alert_state(stock.symbol, a.id)
+                if not a.enabled:
+                    st["state"] = DISABLED
+                    continue
+                if st["state"] == DISABLED:
+                    st["state"] = ARMED
+                exp_dt = _parse_iso_utc(a.expires_at)
+                if exp_dt is not None and bar_utc >= exp_dt:
+                    st["state"] = EXPIRED
+                    st["cooldown_until"] = None
+                    rt.confirm.pop(a.id, None)
+                    continue
+                if st["state"] in (DONE, EXPIRED):
+                    continue
+                if not session_matches_scope(session, a.session_scope, self.cfg.extended_hours):
+                    continue
+
+            prev_before_bar = rt.prev_price
+            for p in probes:
+                probe_tick = PriceTick(
+                    symbol=stock.symbol,
+                    price=p,
+                    prev_close=pc,
+                    change=None,
+                    change_pct=None,
+                    day_high=bar.high,
+                    day_low=bar.low,
+                    provider_time=bar_utc,
+                    fetched_at=now_utc,
+                    source=bar.source or "yahoo_1m",
+                )
+                for a in stock.alerts:
+                    st = self.alert_state(stock.symbol, a.id)
+                    if not a.enabled or st["state"] in (DONE, EXPIRED, DISABLED):
+                        continue
+                    if not session_matches_scope(session, a.session_scope, self.cfg.extended_hours):
+                        continue
+                    cond, rearm_ok, _, tgt_txt = self._eval_condition(
+                        stock, a, rt, p, pc, bar_utc
+                    )
+                    state = st["state"]
+                    if state == WAIT_CROSS:
+                        if not cond:
+                            st["state"] = ARMED
+                        continue
+                    if state == DISARMED:
+                        if not rearm_ok:
+                            continue
+                        st["state"] = ARMED
+                    if st["state"] == COOLDOWN:
+                        cd_until = _parse_iso_utc(st.get("cooldown_until"))
+                        if cd_until is not None and bar_utc < cd_until:
+                            continue
+                        st["state"], st["cooldown_until"] = ARMED, None
+                    if not cond:
+                        continue
+                    rt.confirm[a.id] = 0
+                    self._after_fire(a, st, bar_utc)
+                    if a.id not in dedup:
+                        ev = self._make_event(stock, a, probe_tick, bar_utc, session, tgt_txt, offline=True)
+                        ev.peak_price = p
+                        dedup[a.id] = ev
+                rt.prev_price = p
+
+            if prev_before_bar is None:
+                rt.prev_price = bar.close
+            for ev in dedup.values():
+                self._update_offline_peak(ev, bar)
+
+        return sort_by_priority(list(dedup.values()))
+
+    @staticmethod
+    def _update_offline_peak(ev: AlertEvent, bar: OHLCBar) -> None:
+        cur = ev.peak_price if ev.peak_price is not None else ev.price
+        if ev.kind in ("less_than", "crossing_down", "moving_down", "moving_down_pct"):
+            if bar.low < cur:
+                ev.peak_price = bar.low
+        elif ev.kind in ("greater_than", "crossing_up", "moving_up", "moving_up_pct"):
+            if bar.high > cur:
+                ev.peak_price = bar.high
+        else:
+            cand = bar.high if abs(bar.high - ev.price) >= abs(bar.low - ev.price) else bar.low
+            if abs(cand - ev.price) > abs(cur - ev.price):
+                ev.peak_price = cand
+
     def _eval_condition(
         self,
         stock: StockConfig,
@@ -548,6 +684,7 @@ class AlertEngine:
         now_utc: datetime,
         session: Session,
         target_text: str,
+        offline: bool = False,
     ) -> AlertEvent:
         sess_code = _SESSION_SHORT.get(session, "")
         chg_pct = tick.change_pct
@@ -593,4 +730,6 @@ class AlertEngine:
             data_age_s=tick.age_seconds(now_utc),
             note=a.name,
             notification=spec,
+            event_id=uuid4().hex[:12],
+            offline=offline,
         )

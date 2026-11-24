@@ -197,13 +197,16 @@ class MiniTrackerWindow(tk.Toplevel):
 
     def __init__(self, master, get_state, set_state, get_rows, get_alerts,
                  acknowledge, on_closed=None, get_alert_tooltip=None,
-                 on_row_double_click=None, hidden: bool = False):
+                 on_row_double_click=None, hidden: bool = False,
+                 on_open_inbox=None, get_unacked_count=None):
         super().__init__(master, bg=BG)
         self._get_state, self._set_state = get_state, set_state
         self._get_rows, self._get_alerts = get_rows, get_alerts
         self._acknowledge, self._on_closed = acknowledge, on_closed
         self._get_alert_tooltip = get_alert_tooltip
         self._on_row_double_click = on_row_double_click
+        self._on_open_inbox = on_open_inbox
+        self._get_unacked_count = get_unacked_count
         self._drag = None
         self._dragging = False
         self._pending_refresh = False
@@ -281,6 +284,11 @@ class MiniTrackerWindow(tk.Toplevel):
         self.close_btn = self._icon("✕", self._close)
         self.gear_btn = self._icon("⚙", self.open_settings)
 
+        self.inbox_btn = tk.Label(self.header, text="🔔", font=FONT_ICON, bg=BG2, fg=MUTED,
+                                  cursor="hand2", padx=6)
+        self.inbox_btn.pack(side="left", fill="y")
+        _bind_icon_button(self.inbox_btn, self._open_inbox)
+
         self.center = tk.Label(self.header, text="Mini Tracker", font=FONT_UI,
                                bg=BG2, fg=FG)
         self.center.pack(side="left", expand=True)
@@ -288,6 +296,7 @@ class MiniTrackerWindow(tk.Toplevel):
         # Bind drag before _center_click so an alerting click checks _alerting before refresh() clears it.
         for w in (self.header, self.center):
             _bind_drag(w, self._drag_start, self._drag_move, self._drag_end)
+            w.bind("<Button-3>", lambda _e: self._open_inbox(), add="+")
         self.center.bind("<Button-1>", self._center_click, add="+")
         self.center.bind("<Enter>", self._show_alert_tooltip, add="+")
         self.center.bind("<Leave>", self._hide_alert_tooltip, add="+")
@@ -502,7 +511,20 @@ class MiniTrackerWindow(tk.Toplevel):
         self.body.yview_moveto(y0 if self._overflow else 0)
         self._update_overflow_indicators()
 
+    def _open_inbox(self):
+        if callable(self._on_open_inbox):
+            self._on_open_inbox()
+
     def _update_alert_pill(self):
+        if callable(self._get_unacked_count):
+            try:
+                ucount = int(self._get_unacked_count() or 0)
+            except Exception:
+                ucount = 0
+            self.inbox_btn.config(
+                text=f"🔔 {ucount}" if ucount > 0 else "🔔",
+                fg=AMBER if ucount > 0 else MUTED,
+            )
         count, level = (self._get_alerts() or (0, "warn"))
         if count > 0:
             col = RED if level == "critical" else AMBER

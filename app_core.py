@@ -7,13 +7,14 @@ import inspect
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Callable, Optional
+from uuid import uuid4
 
 from config import Config
 from data_checks import FeedHealth
-from engine import AlertEngine, Notification, compute_expires_at, merge_events
+from engine import AlertEngine, Notification, compute_expires_at, merge_events, sort_by_priority
 from market_clock import ET, IST, MarketCalendar, Session, is_active_session, utcnow
 from models import (ARMED, COOLDOWN, DISABLED, DISARMED, DONE, EXPIRED, WAIT_CROSS, Alert, AlertEvent,
                     PriceTick, StockConfig, ValidationError, Watchlist, resolve_notification_spec)
@@ -36,6 +37,18 @@ def _safe_dec(v) -> Optional[Decimal]:
 
 def _fmt_session_price(p: Optional[Decimal]) -> str:
     return f"{q2(p):.2f}" if (p is not None and p > 0) else "—"
+
+
+def _parse_iso_utc(raw) -> Optional[datetime]:
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass
@@ -135,6 +148,18 @@ class AppController:
         self._notified_invalid_keys: set[int] = set()
         self._last_session: Optional[Session] = None
         self._quote_listeners: list[Callable] = []
+        self._inbox_listeners: list[Callable] = []
+        self._catchup_in_flight: bool = False
+        self._last_catchup_at: Optional[datetime] = None
+        if not isinstance(self.engine.state.get("unacked_alerts"), list):
+            self.engine.state["unacked_alerts"] = []
+        self._startup_last_active_at: Optional[datetime] = _parse_iso_utc(
+            self.engine.state.get("last_active_at")
+        )
+        self._last_active_saved_at: Optional[datetime] = None
+        add_ack = getattr(self.notifier, "add_ack_listener", None)
+        if callable(add_ack):
+            add_ack(self.acknowledge_live_events)
 
     @staticmethod
     def _run_inline(fn, cb):
@@ -185,6 +210,25 @@ class AppController:
                 fn()
             except Exception:
                 log.exception("quote listener failed")
+
+    def add_inbox_listener(self, fn: Callable) -> None:
+        if fn not in self._inbox_listeners:
+            self._inbox_listeners.append(fn)
+
+    def remove_inbox_listener(self, fn: Callable) -> None:
+        if fn in self._inbox_listeners:
+            self._inbox_listeners.remove(fn)
+
+    def _notify_inbox_listeners(self) -> None:
+        for fn in list(self._inbox_listeners):
+            try:
+                fn()
+            except Exception:
+                log.exception("inbox listener failed")
+
+    def _touch_active(self, now: datetime) -> None:
+        now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+        self.engine.state["last_active_at"] = now_utc.isoformat(timespec="seconds")
 
     def _check_session_transition(self, sess: Session) -> None:
         if self._last_session is not None and self._last_session != sess:
@@ -286,6 +330,8 @@ class AppController:
                     "prev_close": str(t.prev_close) if t.prev_close else None,
                     "time": now.isoformat(),
                 }
+        if ticks:
+            self._touch_active(now)
         self.dispatch(events)
         self._save_state()
         self._notify_quote_listeners()
@@ -331,15 +377,209 @@ class AppController:
         """Every alert is logged BEFORE any notification is sent."""
         if not events:
             return
+        added_inbox = False
         for ev in events:
             try:
                 self.store.log_alert(ev)
             except OSError:
                 log.exception("could not write the alert log")
+            if self._record_unacked_event(ev):
+                added_inbox = True
+        if added_inbox:
+            self._save_state()
+            self._notify_inbox_listeners()
         try:
             self.notifier.notify(merge_events(events))
         except Exception:
             log.exception("notification failed")      # a broken backend never stops evaluation
+
+    def _record_unacked_event(self, ev: AlertEvent) -> bool:
+        if ev.kind in ("feed_stale", "key_invalid", "offline_summary") or ev.alert_id == "__test_alert__":
+            return False
+        items = self.engine.state.setdefault("unacked_alerts", [])
+        if not isinstance(items, list):
+            items = []
+            self.engine.state["unacked_alerts"] = items
+        stock = self.wl.get(ev.symbol)
+        alert = next((a for a in stock.alerts if a.id == ev.alert_id), None) if stock else None
+        trigger_type = alert.trigger if alert else "once"
+        peak = ev.peak_price if ev.peak_price is not None else ev.price
+        if ev.offline:
+            for existing in items:
+                if (existing.get("offline")
+                        and existing.get("symbol") == ev.symbol
+                        and existing.get("alert_id") == ev.alert_id):
+                    existing["peak_price"] = str(peak)
+                    return True
+        if not ev.event_id:
+            ev.event_id = uuid4().hex[:12]
+        ev_utc = ev.time.replace(tzinfo=timezone.utc) if ev.time.tzinfo is None else ev.time.astimezone(timezone.utc)
+        rec = {
+            "event_id": ev.event_id,
+            "symbol": ev.symbol,
+            "alert_id": ev.alert_id,
+            "name": ev.name or "",
+            "operator": ev.kind,
+            "priority": ev.priority,
+            "condition": ev.condition or ev.kind,
+            "target_text": ev.target_text or "",
+            "trigger_price": str(ev.price),
+            "peak_price": str(peak),
+            "trigger_time": ev_utc.isoformat(timespec="seconds"),
+            "session": ev.session or "",
+            "source": ev.source or "",
+            "offline": bool(ev.offline),
+            "trigger_type": trigger_type,
+            "message": ev.message or "",
+        }
+        items.append(rec)
+        if len(items) > 300:
+            del items[: len(items) - 300]
+        return True
+
+    def unacked_alerts(self, source_filter: str = "all", symbol: Optional[str] = None) -> list[dict]:
+        items = self.engine.state.get("unacked_alerts")
+        if not isinstance(items, list):
+            return []
+        sym_u = symbol.strip().upper() if symbol else None
+        out = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            is_off = bool(raw.get("offline"))
+            if source_filter == "offline" and not is_off:
+                continue
+            if source_filter == "live" and is_off:
+                continue
+            if sym_u and raw.get("symbol") != sym_u:
+                continue
+            sym = raw.get("symbol", "")
+            aid = raw.get("alert_id", "")
+            stock = self.wl.get(sym)
+            alert = next((a for a in stock.alerts if a.id == aid), None) if stock else None
+            row = self.rows.get(sym)
+            live_p = row.tick.price if (row and row.tick and row.tick.price > 0) else None
+            if live_p is None:
+                ss = self.engine.state.get("symbols", {}).get(sym, {})
+                live_p = _safe_dec(ss.get("last_price"))
+            rec = dict(raw)
+            rec["live_price"] = str(live_p) if live_p is not None else None
+            rec["live_price_text"] = f"${q2(live_p):.2f}" if live_p is not None else "—"
+            rec["rule_exists"] = alert is not None
+            rec["alert_status"] = self.alert_status_label(sym, alert) if alert is not None else "Deleted"
+            rec["can_rearm"] = self.can_rearm(sym, aid)
+            out.append(rec)
+        out.sort(key=lambda r: r.get("trigger_time", ""), reverse=True)
+        return out
+
+    def unacked_summary(self) -> dict:
+        items = self.engine.state.get("unacked_alerts")
+        if not isinstance(items, list):
+            return {"total": 0, "offline": 0, "live": 0}
+        off = sum(1 for r in items if isinstance(r, dict) and r.get("offline"))
+        live = sum(1 for r in items if isinstance(r, dict) and not r.get("offline"))
+        return {"total": off + live, "offline": off, "live": live}
+
+    def acknowledge_alert(self, event_id: str) -> bool:
+        items = self.engine.state.get("unacked_alerts")
+        if not isinstance(items, list):
+            return False
+        kept = [r for r in items if not (isinstance(r, dict) and r.get("event_id") == event_id)]
+        if len(kept) == len(items):
+            return False
+        self.engine.state["unacked_alerts"] = kept
+        self._save_state()
+        self._notify_inbox_listeners()
+        return True
+
+    def acknowledge_all_alerts(self, source_filter: str = "all", symbol: Optional[str] = None) -> int:
+        items = self.engine.state.get("unacked_alerts")
+        if not isinstance(items, list):
+            return 0
+        sym_u = symbol.strip().upper() if symbol else None
+        kept = []
+        removed = 0
+        for r in items:
+            if not isinstance(r, dict):
+                continue
+            is_off = bool(r.get("offline"))
+            match_src = (
+                source_filter == "all"
+                or (source_filter == "offline" and is_off)
+                or (source_filter == "live" and not is_off)
+            )
+            match_sym = (not sym_u) or (r.get("symbol") == sym_u)
+            if match_src and match_sym:
+                removed += 1
+            else:
+                kept.append(r)
+        if removed:
+            self.engine.state["unacked_alerts"] = kept
+            self._save_state()
+            self._notify_inbox_listeners()
+        return removed
+
+    def acknowledge_live_events(self, event_ids: list[str]) -> int:
+        if not event_ids:
+            return 0
+        id_set = set(event_ids)
+        items = self.engine.state.get("unacked_alerts")
+        if not isinstance(items, list):
+            return 0
+        kept = []
+        removed = 0
+        for r in items:
+            if not isinstance(r, dict):
+                continue
+            if not r.get("offline") and r.get("event_id") in id_set:
+                removed += 1
+            else:
+                kept.append(r)
+        if removed:
+            self.engine.state["unacked_alerts"] = kept
+            self._save_state()
+            self._notify_inbox_listeners()
+        return removed
+
+    def can_rearm(self, symbol: str, alert_id: str) -> bool:
+        stock = self.wl.get(symbol)
+        if stock is None:
+            return False
+        alert = next((a for a in stock.alerts if a.id == alert_id), None)
+        if alert is None:
+            return False
+        return self.engine.alert_state(symbol, alert_id).get("state") == DONE
+
+    def rearm_alert(self, symbol: str, alert_id: str, now: Optional[datetime] = None) -> bool:
+        stock = self.wl.get(symbol)
+        if stock is None:
+            return False
+        alert = next((a for a in stock.alerts if a.id == alert_id), None)
+        if alert is None:
+            return False
+        cur_state = self.engine.alert_state(symbol, alert_id).get("state")
+        if cur_state != DONE and alert.enabled:
+            return False
+        t_now = now or self.now_fn()
+        cand = copy.deepcopy(self.wl)
+        cand_stock = cand.get(symbol)
+        target = next(a for a in cand_stock.alerts if a.id == alert_id)
+        target.enabled = True
+        if target.expiration in ("end_of_session", "end_of_next_session", "1_week", "1_month"):
+            target.expires_at = compute_expires_at(target.expiration, t_now, self.calendar)
+        elif target.expiration == "custom":
+            target.expiration = "open_ended"
+            target.expires_at = None
+        self._commit(cand)
+        committed_stock = self.wl.get(symbol)
+        committed_alert = next(a for a in committed_stock.alerts if a.id == alert_id)
+        tick = (self.rows.get(symbol) or RowState()).tick
+        sess = self.session(t_now)
+        self.engine.register_alert(committed_stock, committed_alert, tick, t_now, choice="wait_cross", session=sess)
+        self._save_state()
+        self._notify_quote_listeners()
+        self._notify_inbox_listeners()
+        return True
 
     def housekeeping(self, now: datetime) -> None:
         """Call every few seconds: stale-feed alert (>3 min offline during market hours)."""
@@ -353,12 +593,130 @@ class AppController:
                 self.dispatch([AlertEvent("FEED", "feed-stale", "feed_stale", "RISK", "MEDIUM", Decimal(0), now,
                                           "finnhub", condition="Feed offline: price data is stale",
                                           note="Feed offline: price data is stale")])
+        now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+        if self._last_active_saved_at is None or (now_utc - self._last_active_saved_at).total_seconds() >= 60:
+            self._touch_active(now_utc)
+            self._save_state()
+            self._last_active_saved_at = now_utc
+
+    def mark_shutdown(self, now: Optional[datetime] = None) -> None:
+        t_now = now or self.now_fn()
+        self._touch_active(t_now)
+        self._save_state()
 
     def on_wake(self, now: datetime) -> None:
-        """Wake, unlock or remote-desktop reconnect: poll immediately. Old prices never fire alerts,
-        because alerts are only evaluated on readings that arrive after this."""
+        """Wake, unlock or remote-desktop reconnect: poll immediately and run async offline catch-up."""
+        prev_active = _parse_iso_utc(self.engine.state.get("last_active_at"))
         self.feed.reset_clock(now)
         self.poll_now()
+        self.start_offline_catchup(now, since=prev_active)
+
+    def start_offline_catchup(self, now: Optional[datetime] = None, since: Optional[datetime] = None) -> bool:
+        """Fetch missed 1m OHLC bars since `last_active_at` on background thread and evaluate alerts."""
+        if self._catchup_in_flight:
+            return False
+        t_now = now or self.now_fn()
+        now_utc = t_now.replace(tzinfo=timezone.utc) if t_now.tzinfo is None else t_now.astimezone(timezone.utc)
+        if since is None:
+            since = self._startup_last_active_at
+            self._startup_last_active_at = None
+        if since is None:
+            since = _parse_iso_utc(self.engine.state.get("last_active_at"))
+        if since is None:
+            self._touch_active(now_utc)
+            self._save_state()
+            return False
+        if (now_utc - since).total_seconds() <= 60:
+            self._touch_active(now_utc)
+            self._save_state()
+            return False
+        oldest = now_utc - timedelta(days=6)
+        if since < oldest:
+            since = oldest
+        active_syms = [
+            s.symbol
+            for s in self.wl.symbols
+            if any(
+                a.enabled and self.engine.alert_state(s.symbol, a.id).get("state") not in (DONE, EXPIRED)
+                for a in s.alerts
+            )
+        ]
+        fetch_fn = getattr(self.provider, "fetch_intraday_bars", None)
+        if not active_syms or not callable(fetch_fn):
+            self._touch_active(now_utc)
+            self._save_state()
+            return False
+
+        self._catchup_in_flight = True
+
+        def work():
+            return fetch_fn(active_syms, since, now_utc)
+
+        def on_done(bars_by_sym, exc):
+            self._catchup_in_flight = False
+            self._last_catchup_at = now_utc
+            if exc is not None:
+                log.warning("offline catch-up failed: %s", exc)
+                self._touch_active(now_utc)
+                self._save_state()
+                return
+            if bars_by_sym:
+                self._apply_offline_catchup(bars_by_sym, now_utc)
+            self._touch_active(now_utc)
+            self._save_state()
+
+        self.run_call(work, on_done)
+        return True
+
+    def _apply_offline_catchup(self, bars_by_sym: dict, now: datetime) -> list[AlertEvent]:
+        offline_events: list[AlertEvent] = []
+        for stock in list(self.wl.symbols):
+            bars = bars_by_sym.get(stock.symbol) or []
+            if bars:
+                offline_events.extend(self.engine.evaluate_offline_bars(stock, bars, self.calendar, now))
+        offline_events = sort_by_priority(offline_events)
+        if not offline_events:
+            return []
+        for ev in offline_events:
+            try:
+                self.store.log_alert(ev)
+            except OSError:
+                log.exception("could not write offline alert log")
+            self._record_unacked_event(ev)
+        self._save_state()
+        self._notify_inbox_listeners()
+        self._notify_quote_listeners()
+
+        syms = list(dict.fromkeys(ev.symbol for ev in offline_events))
+        if len(offline_events) == 1:
+            e0 = offline_events[0]
+            summary_msg = f"1 alert triggered while offline: {e0.symbol} {e0.condition} @ ${q2(e0.price):.2f}"
+        else:
+            sym_list = ", ".join(syms[:4]) + ("..." if len(syms) > 4 else "")
+            summary_msg = f"{len(offline_events)} alerts triggered while offline ({sym_list})"
+        top_ev = offline_events[0]
+        summary_ev = AlertEvent(
+            symbol=top_ev.symbol if len(syms) == 1 else "OFFLINE",
+            alert_id="offline-summary",
+            kind="offline_summary",
+            label=top_ev.label,
+            priority=top_ev.priority,
+            price=top_ev.price,
+            time=now,
+            source="yahoo_1m",
+            category=top_ev.category,
+            condition=summary_msg,
+            message=summary_msg,
+            note=f"{len(offline_events)} offline alert(s)",
+            notification=resolve_notification_spec(top_ev.priority),
+            event_id=uuid4().hex[:12],
+            offline=False,
+        )
+        try:
+            self.notifier.notify(Notification([summary_ev]))
+        except Exception:
+            log.exception("offline summary notification failed")
+        return offline_events
 
     # ---- watchlist edits (save first; memory changes only if the save worked) --------------------
     def _commit(self, cand: Watchlist) -> None:

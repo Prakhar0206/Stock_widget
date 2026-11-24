@@ -191,11 +191,23 @@ class PriceTick:
         return max(0, int((now - ref).total_seconds()))
 
 
+@dataclass(frozen=True)
+class OHLCBar:
+    symbol: str
+    time: datetime       # aware UTC (bar timestamp)
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    prev_close: Optional[Decimal] = None
+    source: str = "yahoo_1m"
+
+
 @dataclass
 class AlertEvent:
     symbol: str
     alert_id: str
-    kind: str            # alert operator name | feed_stale | key_invalid
+    kind: str            # alert operator name | feed_stale | key_invalid | offline_summary
     label: str
     priority: str
     price: Decimal
@@ -211,6 +223,9 @@ class AlertEvent:
     data_age_s: int = 0
     note: str = ""
     notification: Optional[CustomNotification] = None
+    event_id: str = ""
+    offline: bool = False
+    peak_price: Optional[Decimal] = None
 
 
 class ValidationError(ValueError):
