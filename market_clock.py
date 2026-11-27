@@ -234,6 +234,39 @@ def is_active_session(session: Session, extended_hours: bool = True) -> bool:
     return session == Session.REGULAR
 
 
+def resolve_session(
+    calendar: MarketCalendar,
+    now: datetime,
+    provider_status: Optional[dict] = None,
+    provider_status_at: Optional[datetime] = None,
+    trading_periods: Optional[dict] = None,
+) -> Session:
+    """Resolve authoritative US market session across calendar rules, fresh holiday closures,
+    and live exchange regular/post period timestamps (resilient to half-day/close Finnhub lag)."""
+    cal_sess = calendar.session_at(now)
+    if (
+        provider_status
+        and provider_status_at is not None
+        and (now - provider_status_at) < timedelta(minutes=30)
+        and provider_status.get("holiday")
+    ):
+        return Session.CLOSED
+    if cal_sess == Session.REGULAR and isinstance(trading_periods, dict):
+        reg_s = trading_periods.get("regular_start")
+        reg_e = trading_periods.get("regular_end")
+        if isinstance(reg_s, int) and isinstance(reg_e, int) and reg_s < reg_e:
+            now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+            now_et_date = now_utc.astimezone(ET).date()
+            period_date = datetime.fromtimestamp(reg_s, timezone.utc).astimezone(ET).date()
+            now_ts = int(now_utc.timestamp())
+            if period_date == now_et_date and now_ts >= reg_e:
+                post_e = trading_periods.get("post_end")
+                if isinstance(post_e, int) and post_e >= reg_e and now_ts >= post_e:
+                    return Session.CLOSED
+                return Session.AFTER
+    return cal_sess
+
+
 def fmt_ist(when: datetime) -> str:
     return when.astimezone(IST).strftime("%H:%M")
 

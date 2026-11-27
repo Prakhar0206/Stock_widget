@@ -51,3 +51,25 @@ def test_extra_overrides_and_next_close():
     assert not c.is_trading_day(D(2026,10,28))
     w = c.next_close(datetime(2026,10,27,17,0,tzinfo=ET))
     assert w.date() == D(2026,10,29)
+
+
+def test_resolve_session_black_friday_and_surprise_early_close():
+    try:
+        from market_clock import resolve_session
+    except ImportError:
+        from stock_alert_widget.market_clock import resolve_session
+
+    c = MarketCalendar()
+    bf = datetime(2026, 11, 27, 13, 8, tzinfo=ET)
+    assert resolve_session(
+        c, bf,
+        provider_status={"isOpen": True, "holiday": None, "session": "regular"},
+        provider_status_at=bf,
+    ) is Session.AFTER
+
+    # Unexpected holiday closure overrides calendar
+    assert resolve_session(
+        c, datetime(2026, 10, 26, 11, 0, tzinfo=ET),
+        provider_status={"isOpen": False, "holiday": "National Day of Mourning", "session": None},
+        provider_status_at=datetime(2026, 10, 26, 11, 0, tzinfo=ET),
+    ) is Session.CLOSED

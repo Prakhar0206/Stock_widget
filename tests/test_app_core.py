@@ -263,3 +263,78 @@ def test_session_transition_triggers_instant_poll(tmp_path):
 
     c.status_strip(datetime(2026, 10, 26, 9, 31, tzinfo=ET))
     assert woke == [1]
+
+
+def test_black_friday_early_close_ignores_false_finnhub_regular_status(tmp_path):
+    c, rec, st = make(tmp_path)
+    bf_after = datetime(2026, 11, 27, 13, 8, tzinfo=ET)
+    c.provider_status = {"isOpen": True, "holiday": None, "session": "regular"}
+    c.provider_status_at = bf_after
+
+    assert c.session(bf_after) == Session.AFTER
+    strip = c.status_strip(bf_after)
+    assert strip.session == "AFTER"
+    assert strip.session_icon == "🌇"
+
+    # Normal day 16:05 ET with stale Finnhub regular status also resolves to AFTER
+    norm_after = datetime(2026, 10, 26, 16, 5, tzinfo=ET)
+    c.provider_status_at = norm_after
+    assert c.session(norm_after) == Session.AFTER
+
+
+def test_surprise_early_close_via_yahoo_trading_periods_syncs_ctrl_and_scheduler(tmp_path):
+    from providers.finnhub import FinnhubProvider
+    from scheduler import Scheduler
+
+    st = Store(tmp_path)
+    write(st.watchlist_path, EXAMPLE)
+    cfg = Config()
+    c = AppController(cfg, st, MockProvider({}), Rec(st), now_fn=lambda: T0)
+
+    # Normal Monday 13:05 ET overridden by live Yahoo regular_end=13:00 ET
+    surprise = datetime(2026, 10, 26, 13, 5, tzinfo=ET)
+    reg_s = int(datetime(2026, 10, 26, 9, 30, tzinfo=ET).timestamp())
+    reg_e = int(datetime(2026, 10, 26, 13, 0, tzinfo=ET).timestamp())
+    post_e = int(datetime(2026, 10, 26, 17, 0, tzinfo=ET).timestamp())
+    c.provider.trading_periods = {"regular_start": reg_s, "regular_end": reg_e, "post_end": post_e}
+    c.provider_status = {"isOpen": True, "holiday": None, "session": "regular"}
+    c.provider_status_at = surprise
+    assert c.session(surprise) == Session.AFTER
+
+    q = queue.Queue()
+    mp = MockProvider({"AAPL": [200], "TTWO": [205]})
+    mp.trading_periods = dict(c.provider.trading_periods)
+    sched = Scheduler(mp, lambda: ["AAPL"], q, cfg, now_fn=lambda: surprise)
+    sched.poll_once()
+    assert mp.current_session == "AFTER"
+
+    # Weekend _last_bar fallback after Black Friday places 13:30 ET bar into ah_price, not reg_price
+    prov = FinnhubProvider(api_key="k", now_fn=lambda: surprise)
+    t_reg = int(datetime(2026, 11, 27, 12, 55, tzinfo=ET).timestamp())
+    t_ah = int(datetime(2026, 11, 27, 13, 30, tzinfo=ET).timestamp())
+
+    class _Resp:
+        status_code = 200
+        text = json.dumps({
+            "chart": {
+                "result": [{
+                    "meta": {"chartPreviousClose": 100.0},
+                    "timestamp": [t_reg, t_ah],
+                    "indicators": {"quote": [{"close": [101.0, 102.5]}]},
+                }]
+            }
+        })
+
+    class _YahooSess:
+        def get(self, *a, **kw):
+            return _Resp()
+
+        def close(self):
+            pass
+
+    prov._yahoo_s = _YahooSess()
+    prov._uses_real_http = True
+    ext = prov._fetch_yahoo_extended("AAPL")
+    assert ext is not None
+    assert float(ext["reg_price"]) == 101.0
+    assert float(ext["ah_price"]) == 102.5

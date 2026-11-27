@@ -123,7 +123,15 @@ class _FakeLayer:
 
 @pytest.fixture(scope="module")
 def _tk_mod_root():
-    root = tk.Tk()
+    root = None
+    for _ in range(5):
+        try:
+            root = tk.Tk()
+            break
+        except tk.TclError:
+            time.sleep(0.05)
+    if root is None:
+        root = tk.Tk()
     root.withdraw()
     try:
         yield root

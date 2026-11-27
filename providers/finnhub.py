@@ -26,12 +26,12 @@ import threading
 import time
 from collections import deque
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Optional
 from urllib.parse import quote
 
-from market_clock import ET
+from market_clock import ET, MarketCalendar
 from models import OHLCBar, PriceTick
 from providers.base import (MalformedResponse, NetworkFailure, ProviderError, QuoteProvider,
                             RateLimited)
@@ -100,6 +100,7 @@ class FinnhubProvider(QuoteProvider):
                  internet_check_fn: Optional[Callable[[], bool]] = None):
         self._uses_real_http = (session is None)
         self.current_session: Optional[str] = None
+        self.trading_periods: Optional[dict] = None
         self.key_source: str = "unknown"
         self._yahoo_s = None
         if session is None:
@@ -583,6 +584,11 @@ class FinnhubProvider(QuoteProvider):
                 return None, None
             return _int_ts(w.get("start")), _int_ts(w.get("end"))
 
+        reg_s, reg_e = _bounds("regular")
+        _, post_e = _bounds("post")
+        if reg_s is not None and reg_e is not None and reg_s < reg_e:
+            self.trading_periods = {"regular_start": reg_s, "regular_end": reg_e, "post_end": post_e}
+
         def _last_bar(key: str) -> tuple[Optional[Decimal], Optional[int]]:
             start, end = _bounds(key)
             best_p, best_t = None, None
@@ -598,11 +604,6 @@ class FinnhubProvider(QuoteProvider):
                     return best_p, best_t
 
             # Fallback when currentTradingPeriod bounds are on another date (e.g. weekend/holiday)
-            windows = {"pre": (240, 570), "regular": (570, 960), "post": (960, 1200)}
-            win = windows.get(key)
-            if not win:
-                return None, None
-            lo_m, hi_m = win
             dated_bars: list[tuple[str, int, int, Decimal]] = []
             for ts_raw, cl_raw in zip(timestamps, closes):
                 ts = _int_ts(ts_raw)
@@ -615,6 +616,14 @@ class FinnhubProvider(QuoteProvider):
             if not dated_bars:
                 return None, None
             latest_date = max(d for d, _, _, _ in dated_bars)
+            early = MarketCalendar().is_early_close(date.fromisoformat(latest_date))
+            close_m = 780 if early else 960
+            after_end_m = 1020 if early else 1200
+            windows = {"pre": (240, 570), "regular": (570, close_m), "post": (close_m, after_end_m)}
+            win = windows.get(key)
+            if not win:
+                return None, None
+            lo_m, hi_m = win
             for d, hm, ts, p in dated_bars:
                 if d == latest_date and lo_m <= hm < hi_m:
                     best_p, best_t = p, ts

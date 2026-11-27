@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 from config import BudgetError, Config, check_budget
 from data_checks import Backoff
-from market_clock import MarketCalendar, is_active_session, utcnow
+from market_clock import MarketCalendar, is_active_session, resolve_session, utcnow
 from providers.base import MalformedResponse, NetworkFailure, ProviderError, QuoteProvider, RateLimited
 
 log = logging.getLogger("saw.scheduler")
@@ -104,7 +104,11 @@ class Scheduler(threading.Thread):
 
     def poll_once(self) -> float:
         now = self.now_fn()
-        session = self.provider_session or self.calendar.session_at(now)
+        session = self.provider_session or resolve_session(
+            self.calendar,
+            now,
+            trading_periods=getattr(self.provider, "trading_periods", None),
+        )
         extended = getattr(self.cfg, "extended_hours", True)
         active = is_active_session(session, extended)
 

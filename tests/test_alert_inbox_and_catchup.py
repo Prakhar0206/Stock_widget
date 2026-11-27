@@ -433,7 +433,16 @@ def test_ui_inbox_dialog_widget_badge_and_mini_tracker(tmp_path):
     from ui.inbox import AlertInboxDialog
     from ui.widget import WidgetView
 
-    root = tk.Tk()
+    root = None
+    for _ in range(5):
+        try:
+            root = tk.Tk()
+            break
+        except tk.TclError:
+            import time
+            time.sleep(0.05)
+    if root is None:
+        root = tk.Tk()
     root.withdraw()
     try:
         st = Store(tmp_path)

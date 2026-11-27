@@ -15,7 +15,7 @@ from uuid import uuid4
 from config import Config
 from data_checks import FeedHealth
 from engine import AlertEngine, Notification, compute_expires_at, merge_events, sort_by_priority
-from market_clock import ET, IST, MarketCalendar, Session, is_active_session, utcnow
+from market_clock import ET, IST, MarketCalendar, Session, is_active_session, resolve_session, utcnow
 from models import (ARMED, COOLDOWN, DISABLED, DISARMED, DONE, EXPIRED, WAIT_CROSS, Alert, AlertEvent,
                     PriceTick, StockConfig, ValidationError, Watchlist, resolve_notification_spec)
 from positions import q2
@@ -241,28 +241,16 @@ class AppController:
         self._last_session = sess
 
     def session(self, now: datetime) -> Session:
-        """Provider market status when it answered recently, else the bundled calendar."""
+        """Resolve authoritative US session from calendar rules, holiday closures, and live exchange periods."""
         if self.session_override is not None:
             return self.session_override
-        cal_sess = self.calendar.session_at(now)
-        st = self.provider_status
-        if st and self.provider_status_at and now - self.provider_status_at < timedelta(minutes=30):
-            # An explicit holiday closure from the provider overrides the calendar:
-            if st.get("holiday"):
-                return Session.CLOSED
-            s = (st.get("session") or "").lower()
-            if st.get("isOpen") and s in ("", "regular"):
-                return Session.REGULAR
-            # A pre-market status reading from before open cannot block regular trading hours:
-            if cal_sess == Session.REGULAR:
-                return Session.REGULAR
-            if s == "pre-market":
-                return Session.PRE
-            if s == "post-market":
-                return Session.AFTER
-            if not st.get("isOpen"):
-                return Session.CLOSED
-        return cal_sess
+        return resolve_session(
+            self.calendar,
+            now,
+            provider_status=self.provider_status,
+            provider_status_at=self.provider_status_at,
+            trading_periods=getattr(self.provider, "trading_periods", None),
+        )
 
     def on_ticks(self, ticks: list, now: datetime) -> None:
         self._check_provider_invalid_keys(now)

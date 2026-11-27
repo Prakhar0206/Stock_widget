@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-282%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/Tests-285%20Passed-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero Cloud](https://img.shields.io/badge/Privacy-100%25%20Local%20%26%20Redacted-success)](README.md#privacy--security)
 
@@ -174,7 +174,7 @@ The `run_stock_alert_widget.bat` script provides a full suite of management comm
 | `run_stock_alert_widget.bat` | Starts the widget in the background via `pythonw.exe` (no console window). |
 | `run_stock_alert_widget.bat demo` | Starts in demo mode (`--mock`) with scripted price swings across a safe isolated folder. |
 | `run_stock_alert_widget.bat debug` | Starts in foreground console mode to display live logs and tracebacks. |
-| `run_stock_alert_widget.bat test` | Runs the full 282-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
+| `run_stock_alert_widget.bat test` | Runs the full 285-test automated `pytest` suite (installs `requirements-dev.txt` if needed). |
 | `run_stock_alert_widget.bat startup status` | Checks if the Windows Startup shortcut is configured. |
 | `run_stock_alert_widget.bat startup create` | Configures the widget to automatically launch on Windows login. |
 | `run_stock_alert_widget.bat startup remove` | Removes the Windows Startup shortcut. |
@@ -247,32 +247,32 @@ python -m pytest
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.x, pytest-9.x.x
-collected 282 items
+collected 285 items
 
 tests/test_alert_inbox_and_catchup.py ..........                         [  3%]
-tests/test_app_core.py ................                                  [  9%]
-tests/test_audit_and_extended_hours.py ................................. [ 20%]
+tests/test_app_core.py ..................                                [  9%]
+tests/test_audit_and_extended_hours.py ................................. [ 21%]
 tests/test_config_multikey.py ..................                         [ 27%]
-tests/test_config_store.py .....................                         [ 34%]
+tests/test_config_store.py .....................                         [ 35%]
 tests/test_data_checks.py .......                                        [ 37%]
-tests/test_desktop_layer_stub.py ..........                              [ 40%]
+tests/test_desktop_layer_stub.py ..........                              [ 41%]
 tests/test_engine.py ...........                                         [ 44%]
 tests/test_finnhub_pool.py ............................                  [ 54%]
 tests/test_finnhub_scheduler.py ...................                      [ 61%]
 tests/test_main_demo.py ........                                         [ 64%]
 tests/test_main_multikey.py .........                                    [ 67%]
 tests/test_market_clock.py ......                                        [ 69%]
-tests/test_market_clock_rules.py .......                                 [ 71%]
+tests/test_market_clock_rules.py ........                                [ 72%]
 tests/test_mini_tracker.py .............................                 [ 82%]
 tests/test_notifier.py ...........                                       [ 86%]
-tests/test_pipeline.py .....                                             [ 87%]
+tests/test_pipeline.py .....                                             [ 88%]
 tests/test_positions.py .....                                            [ 89%]
 tests/test_privacy.py ......                                             [ 91%]
 tests/test_replay_soak.py ..                                             [ 92%]
 tests/test_startup_shortcut.py ..                                        [ 93%]
 tests/test_ui_smoke.py ...................                               [100%]
 
-============================ 282 passed =======================================
+============================ 285 passed =======================================
 ```
 
 ---
